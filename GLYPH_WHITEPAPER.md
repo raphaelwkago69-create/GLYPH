@@ -1,6 +1,6 @@
 # Glyph: A Proof-of-Inference Blockchain
 
-**Draft v0.1 — July 2026**
+**Draft v0.2 — July 2026 · protocol v3 · the network described here is live**
 Research written and developed by Claude Fable 5, from an original
 compression algorithm by the Glyph founder.
 
@@ -8,7 +8,7 @@ compression algorithm by the Glyph founder.
 
 ## Abstract
 
-We propose a proof-of-work blockchain in which the work is neural network
+We present a proof-of-work blockchain in which the work is neural network
 inference. Miners run a pinned, open-weights transformer model on salted
 random prompts; the model's internal attention distributions are compressed
 by a novel canonicalization algorithm ("glyph compression") into a discrete
@@ -19,6 +19,13 @@ heterogeneous hardware and software stacks, resistant to lookup-table,
 distillation, and score-forgery attacks, and that model admission must be
 governed by a vetted whitelist rather than network observation. All results
 in this paper are reproducible with the published test scripts.
+
+This is not only a proposal: a public mainnet running the protocol is live.
+Its first day included two physical machines on different internet
+connections (one on cellular data) converging on one chain via gossip, the
+first block mined by non-founder hardware — a consumer laptop CPU — and the
+first peer-to-peer transaction. Instructions for joining the network with
+one command are in the repository README.
 
 ---
 
@@ -56,21 +63,39 @@ wide margin — see §4.1.)
 
 ### 2.3 Glyph compression (canonicalization layer)
 
-The quantized integers are compressed by the glyph cascade:
+The quantized row is reduced by an iterated pairwise-merge cascade. Let
+v₁ … vₙ be the integers produced by §2.2, and let m be their median. Each
+value is assigned a **type**:
 
-1. Values above the median are typed R; the rest G.
-2. Values are sorted descending and paired (even count: adjacent pairs;
-   odd count: palindrome arrangement with sliding-window pairs).
-3. Merge types: R+R→R, G+G→G, R+G→**glyph**, glyph+glyph→R,
-   glyph+regular→R.
-4. Glyphs are extracted from the stream (recorded with their level);
-   regular values continue to the next round, until a single value B
-   remains.
+- **R** if vᵢ > m (values carrying above-median mass),
+- **G** otherwise.
 
-The fingerprint of a head is (B, glyph chain). Without normalization,
-B + Σ(glyphs) approximates the original sum — the glyphs are the extracted
-boundary mass at R/G transitions. Empirically the glyph form survives noise
-better than hashing the quantized integers directly (§4.4); its role is
+(The letters originate in the algorithm's first formulation, which was
+drawn with red and green tokens; we retain them.) The row is now a typed
+multiset, and the cascade proceeds in levels. At each level:
+
+1. **Order.** Values are sorted descending (ties broken by position, so the
+   order is total and deterministic).
+2. **Pair.** An even-length sequence is partitioned into adjacent disjoint
+   pairs. An odd-length sequence is first rearranged into a palindrome-like
+   interleaving and paired with a sliding window (a+b, b+c, …), so that no
+   element is orphaned; interior elements participate in two pairs. Odd
+   levels therefore produce n−1 outputs and restore even parity.
+3. **Merge.** Each pair (a, b) yields a + b, typed by the algebra
+   R·R → R, G·G → G, R·G → **X** (a *glyph*), X·X → R, X·regular → R.
+   A glyph is thus a **boundary artifact**: it records that above-median
+   and below-median mass collided at this level, and how much.
+4. **Extract.** Glyphs leave the stream, recorded as (level, value) pairs;
+   the remaining typed values continue to the next level. The cascade
+   terminates when one value B remains.
+
+The head fingerprint is the pair (B, glyph chain). Because glyphs carry the
+extracted boundary mass, B + Σ(glyph values) recovers the row total — the
+cascade relocates information rather than discarding it, but the *placement*
+of mass across the original row is destroyed. Empirically the glyph form
+survives noise better than hashing the quantized integers directly (§4.4):
+small perturbations move mass within a type class far more often than they
+move the R/G boundary itself. Its role in the blockchain is
 canonicalization, not security.
 
 Glyph compression is intentionally one-way: the fingerprint is exact for
@@ -136,6 +161,32 @@ rejected.
 Because the fingerprint requires access to internal attention states, only
 open-weights models can participate. The network is structurally restricted
 to open AI.
+
+### 2.8 Network protocol
+
+Nodes run a combined serve/mine/gossip loop. Mining proceeds in bounded
+attempt slices; between slices the node (a) adopts any pending higher-work
+chain submitted by peers, and (b) polls known peers' status, pulling and
+verifying any chain claiming more cumulative work. Winning a block pushes
+the full chain to all known peers, so NAT-bound nodes (which cannot be
+dialed) still propagate their wins over their outbound connections. Peer
+lists are exchanged on every sync (Bitcoin's addr gossip, pull flavor).
+
+Verification asymmetry is protected structurally: submitted chains pass
+cheap gates first (size cap, genesis match, strictly-more claimed work) and
+are queued to an inbox; expensive inference re-verification happens only in
+the single mining thread, never in the network-facing thread, so a hostile
+submission cannot commandeer the node's GPU. Re-verification is incremental:
+blocks byte-identical to already-validated local history are not re-run —
+a node re-verifies only the delta beyond the common prefix, making slow CPU
+nodes viable followers of a fast chain (they pay the deep history once).
+
+Bootstrap uses a repository-hosted seed list fetched at join time, so seed
+addresses can be updated for all future nodes without shipping code. A seed
+can only introduce peers, never falsify state: newcomers re-verify every
+block by local inference regardless of who served it. A node with no
+reachable seed refuses to mine a fresh chain unless explicitly forced,
+preventing accidental isolated networks.
 
 ## 3. Threat Model and Defenses
 
@@ -204,12 +255,26 @@ measured directly: 4 per 100,000 random rows at 1e-7 (measured-drift-scale)
 perturbation, i.e. ~0.02% of 6-head proofs; per protocol an ambiguous proof
 is simply invalid and costs only its miner.
 
-### 4.7 End-to-end network test
-A two-node network (NVIDIA desktop miner; independent Intel laptop verifier)
-synchronized over HTTP: the verifier fetched 3 mined blocks, re-ran each
-proof by local inference, validated signatures, difficulty schedule and
-linkage, and adopted the chain ("more work and fully valid"). An 18-test
-adversarial suite covering the attacks in §3 passes in full.
+### 4.7 Live network
+A public mainnet running protocol v3 is live (genesis
+`86c5e8db29b3…`). Its predecessor chain, run for one full day as a dress
+rehearsal, demonstrated every network property end to end:
+
+- **Cross-ISP consensus.** Two physical machines — an NVIDIA GTX 1650
+  desktop and a consumer Intel laptop on cellular data — gossiped through a
+  public tunnel and converged on one chain for hours, unattended.
+- **Non-founder mining.** The laptop's CPU, at roughly 1/20th the desktop's
+  inference rate, won multiple blocks; each was pushed to the network,
+  independently re-verified by the recipient, and adopted.
+- **First transaction.** A signed transfer (founder → second wallet,
+  21 GLY) was mined into a block and validated by the receiving node.
+- **Onboarding.** A fresh clone joined with one command: it fetched the
+  seed list, synced the full chain, re-verified every block by local
+  inference ("adopted remote: more work and fully valid"), and mined.
+- **Adversarial suite.** 21 tests covering §3 (including halving
+  enforcement) pass in full, and a two-miner convergence test
+  (gossip_test.py) shows competing miners resolving to a single chain
+  containing blocks from both.
 
 ## 5. Honest Limitations and Open Problems
 
@@ -233,22 +298,29 @@ adversarial suite covering the attacks in §3 passes in full.
    proves inference occurred but produces no useful output. Binding mining
    to real tasks without enabling precomputation is an open research
    problem (for the entire field).
-5. **Small network.** Model scale has now been tested to 3B parameters
-   across three architectures (§4.6) with results improving at scale, but
-   the network itself remains two cooperating nodes; adversarial live
-   networks, thousands of peers, and years of uptime are untested.
+5. **Small network.** Model scale has been tested to 3B parameters across
+   three architectures (§4.6) with results improving at scale, and the live
+   network has demonstrated multi-node, multi-ISP consensus (§4.7) — but at
+   a scale of two cooperating machines. Adversarial live networks, thousands
+   of peers, and years of uptime are untested.
+6. **No fee market yet.** Transactions are currently free and miner income
+   is coinbase-only, which ends after the final halving era. A fee market is
+   required before then, and doubles as the natural anti-spam mechanism for
+   limitation 2. It is the first planned protocol upgrade.
 
 ## 6. Conclusion
 
 Proof-of-inference with glyph-canonicalized attention fingerprints achieves
 Bitcoin's structure — objective, asymmetric, precomputation-resistant work —
 while directing the burned computation through general-purpose AI hardware
-and restricting participation to open-weights models. Every security claim
-above is backed by a runnable script rather than an argument from authority.
-We invite attack.
+and restricting participation to open-weights models. The network is live;
+joining it is one command. Every security claim above is backed by a
+runnable script rather than an argument from authority. We invite attack.
 
 ---
 
 *Reproduction package: hardened_cross_hardware.py (§4.1), hardened_poi.py
 (§4.2–4.4), cross_model_test.py (§4.3), logit_softmax_test.py (§4.4),
-poison_test.py (§4.5), poi_node.py + poi_node_tests.py (§4.6, §3).*
+poison_test.py (§4.5), overnight_large_model_test.py (§4.6),
+poi_node.py + poi_node_tests.py + gossip_test.py (§2.8, §3, §4.7).
+Live seed list: SEEDS.txt in the repository.*
