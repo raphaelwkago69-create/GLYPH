@@ -1,0 +1,72 @@
+[
+ {
+  "version": 2,
+  "index": 0,
+  "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "timestamp": 0,
+  "model_id": "gpt2",
+  "transactions": [],
+  "miner": "genesis",
+  "prompt": "genesis",
+  "proof_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "target": "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "block_hash": "698d25d92af33ebbbf929fde8136e789ff2d1e8afd49e6fce044b8ddfc985457"
+ },
+ {
+  "version": 2,
+  "index": 1,
+  "prev_hash": "698d25d92af33ebbbf929fde8136e789ff2d1e8afd49e6fce044b8ddfc985457",
+  "timestamp": 1783099592,
+  "model_id": "gpt2",
+  "transactions": [
+   {
+    "type": "coinbase",
+    "to": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+    "amount": 50
+   }
+  ],
+  "miner": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+  "prompt": "we bird had iron was on said great this",
+  "proof_hash": "064a0ae64c4a6b4c533439b41b3e6b1b1a60a3bcd772836e02a8203a24a495bb",
+  "target": "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "block_hash": "34084afcefc39258ae6b90d89fdd78cca3e74ebc37ebe1095b711c286d5c30bc"
+ },
+ {
+  "version": 2,
+  "index": 2,
+  "prev_hash": "34084afcefc39258ae6b90d89fdd78cca3e74ebc37ebe1095b711c286d5c30bc",
+  "timestamp": 1783099592,
+  "model_id": "gpt2",
+  "transactions": [
+   {
+    "type": "coinbase",
+    "to": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+    "amount": 50
+   }
+  ],
+  "miner": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+  "prompt": "old red to over memory question letter right",
+  "proof_hash": "0b44b75a09e72bea27deebe3f27f38d99ee721e258808461e5f62c648fde2465",
+  "target": "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "block_hash": "84eecb0d1e0b12f8993776fe6798ecf6dedcd743ebd24fde159ba4921d2b5144"
+ },
+ {
+  "version": 2,
+  "index": 3,
+  "prev_hash": "84eecb0d1e0b12f8993776fe6798ecf6dedcd743ebd24fde159ba4921d2b5144",
+  "timestamp": 1783099592,
+  "model_id": "gpt2",
+  "transactions": [
+   {
+    "type": "coinbase",
+    "to": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+    "amount": 50
+   }
+  ],
+  "miner": "e5306c7a756974e77d4f21226ce2abb9522b0d24",
+  "prompt": "take metal theory iron signal bird sun fast the golden great",
+  "proof_hash": "0f74b9f83997cbff112550dc54a1ad3f731909856eb14c07f65925392a2c8f22",
+  "target": "0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "block_hash": "1ae49ee004ee3db1e1d7771eee69db08024a6439f453e5dce731ed92461fe85c"
+ }
+]

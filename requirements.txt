@@ -1,0 +1,4 @@
+torch>=2.5
+transformers>=4.44
+ecdsa>=0.19
+numpy

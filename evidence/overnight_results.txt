@@ -1,0 +1,31 @@
+[00:53:56] ==================================================================
+[00:53:56] OVERNIGHT RUN START
+[00:53:56] ==================================================================
+[00:53:56] PART 1: Qwen2.5-0.5B GPU-vs-CPU determinism (fp32, 60 prompts)
+[00:53:56] loading Qwen/Qwen2.5-0.5B on cuda (torch.float32) ...
+[00:54:01]   Qwen/Qwen2.5-0.5B: 24 layers x 14 heads, 0.49B params
+[00:54:03]   [cuda] ultimate hash: a70857ff8ead5bdac2d0dd8377a6775c71fa878dcbda892db5295eb83744474d
+[00:54:03] loading Qwen/Qwen2.5-0.5B on cpu (torch.float32) ...
+[00:54:06]   Qwen/Qwen2.5-0.5B: 24 layers x 14 heads, 0.49B params
+[00:54:16]   [cpu] ultimate hash: a70857ff8ead5bdac2d0dd8377a6775c71fa878dcbda892db5295eb83744474d
+[00:54:16]   PART 1 VERDICT: GPU==CPU bit-for-bit: True
+[00:54:16] PART 2: Qwen2.5-1.5B quality suite (CPU fp32) -- the 12x scale test
+[00:54:16] loading Qwen/Qwen2.5-1.5B on cpu (torch.float32) ...
+[01:02:18]   Qwen/Qwen2.5-1.5B: 28 layers x 12 heads, 1.54B params
+[01:02:29]   [Qwen2.5-1.5B] speed: 2.68 fingerprints/sec
+[01:02:47]   [Qwen2.5-1.5B] space progress 50/200 (50 unique)
+[01:03:06]   [Qwen2.5-1.5B] space progress 100/200 (100 unique)
+[01:03:24]   [Qwen2.5-1.5B] space progress 150/200 (150 unique)
+[01:03:43]   [Qwen2.5-1.5B] space progress 200/200 (200 unique)
+[01:03:43]   [Qwen2.5-1.5B] fingerprint space: 200/200 (100.0%)
+[01:04:01]   [Qwen2.5-1.5B] noise 1e-4 survival: 48/50
+[01:04:01] PART 3 (best effort): Qwen2.5-3B mini suite (CPU fp32, may exceed RAM)
+[01:04:01] loading Qwen/Qwen2.5-3B on cpu (torch.float32) ...
+[01:25:40]   Qwen/Qwen2.5-3B: 36 layers x 16 heads, 3.09B params
+[01:35:45]   [Qwen2.5-3B] speed: 0.05 fingerprints/sec
+[01:36:24]   [Qwen2.5-3B] space progress 50/60 (50 unique)
+[01:36:32]   [Qwen2.5-3B] fingerprint space: 60/60 (100.0%)
+[01:36:47]   [Qwen2.5-3B] noise 1e-4 survival: 17/20
+[01:36:48] ==================================================================
+[01:36:48] OVERNIGHT RUN COMPLETE
+[01:36:48] ==================================================================
