@@ -2,4 +2,3 @@
 # Nodes fetch this file from GitHub at startup, so it can be updated
 # without shipping new code. PRs adding community seed nodes welcome.
 https://pittsburgh-serving-accountability-geo.trycloudflare.com
-http://192.168.100.9:9401
