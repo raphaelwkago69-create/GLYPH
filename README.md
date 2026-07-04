@@ -92,9 +92,13 @@ Blocks you win pay your own local wallet.
 
 ## Tokenomics
 
-- Block reward: **7 GLY**, block target: **20 seconds**
-- Halving every **1,500,000 blocks** (~once a year): 7 → 3 → 1 → 0
-- Total supply converges below **21,000,000 GLY**
+- Block reward: **7.00 GLY**, block target: **20 seconds**
+- Amounts are integers in the smallest unit (1 GLY = 100 units), like
+  Bitcoin's satoshis — the coin stays spendable in small amounts no matter
+  its price
+- Halving every **1,500,000 blocks** (~once a year): 7.00 → 3.50 → 1.75 → …
+  → 0 after era 10
+- Total supply converges to **~20,910,000 GLY**
 - Validators enforce the height-correct reward — a coinbase claiming a
   pre-halving reward after the halving height is an invalid block (tested)
 

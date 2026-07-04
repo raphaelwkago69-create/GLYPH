@@ -28,7 +28,7 @@ Files: poi_chain_v2.json (chain), poi_wallets.json (keys), poi_mempool.json
 import hashlib, json, math, os, random, sys, time
 
 # ------------------------------------------------------------ protocol -----
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 MODEL_REGISTRY = {
     # vetted by audit (determinism / fingerprint-space / cost benchmarks);
     # additions require a protocol version bump adopted by the whole network
@@ -37,14 +37,21 @@ MODEL_REGISTRY = {
 ACTIVE_MODEL       = "gpt2"
 GRID               = 100
 N_FP_HEADS         = 6
-INITIAL_REWARD     = 7           # halves every HALVING_INTERVAL blocks
-HALVING_INTERVAL   = 1_500_000   # ~347 days at 20s blocks; supply -> 21M GLY
+# All amounts are integers in the smallest unit: 1 GLY = 100 units.
+# (Divisibility, like Bitcoin's satoshis; also makes the halving sum clean.)
+UNITS_PER_GLY      = 100
+INITIAL_REWARD     = 700         # units = 7.00 GLY; halves per era below
+HALVING_INTERVAL   = 1_500_000   # blocks per era (~347 days at 20s blocks);
+                                 # 700>>k summed over eras -> 20.91M GLY cap
 
 def block_reward(height):
-    """Coinbase reward at a given block height. 7 -> 3 -> 1 -> 0 (integer
-    halving); total supply converges below 21,000,000 GLY."""
+    """Coinbase reward in units at a given height. 700 -> 350 -> 175 -> ...
+    -> 0 after era 10; total supply converges to ~20,910,000 GLY."""
     return INITIAL_REWARD >> (height // HALVING_INTERVAL)
-TARGET_BLOCK_TIME  = 20          # seconds (demo value)
+
+def fmt_gly(units):
+    return f"{units / UNITS_PER_GLY:.2f}"
+TARGET_BLOCK_TIME  = 20          # seconds
 RETARGET_INTERVAL  = 5           # blocks
 MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
 # Known public nodes tried automatically before mining on a fresh chain.
@@ -346,7 +353,7 @@ def mine_block(chain, miner_addr, transactions=None, quiet=False, max_attempts=N
                 dt = time.time() - t0
                 print(f"[mine] block {index}: won in {attempt} attempts "
                       f"({dt:.1f}s, {attempt/max(dt,1e-9):.0f} inf/s)  "
-                      f"reward {block_reward(index)} -> {miner_addr[:12]}...")
+                      f"reward {fmt_gly(block_reward(index))} GLY -> {miner_addr[:12]}...")
             return block
     if max_attempts is not None:
         return None
@@ -653,7 +660,9 @@ def main():
             mp = []; save_mempool(mp)
         print(f"[node] height {len(chain)-1}, total work {chain_work(chain):,}")
     elif cmd == "send":
-        frm, to, amt = sys.argv[2], sys.argv[3], int(sys.argv[4])
+        # amount is given in GLY (decimals allowed), stored in units
+        frm, to = sys.argv[2], sys.argv[3]
+        amt = round(float(sys.argv[4]) * UNITS_PER_GLY)
         wallets = load_wallets()
         w = wallets[frm]
         to_addr = wallets[to]["address"] if to in wallets else to
@@ -667,14 +676,15 @@ def main():
               "nonce": max(used + [chain_nonce]) + 1, "pubkey": w["public"]}
         tx = sign_tx(tx, w["private"])
         mp.append(tx); save_mempool(mp)
-        print(f"[tx] queued {amt} from {frm} -> {to} (balance {bal.get(w['address'], 0)})")
+        print(f"[tx] queued {fmt_gly(amt)} GLY from {frm} -> {to} "
+              f"(balance {fmt_gly(bal.get(w['address'], 0))})")
     elif cmd == "balance":
         bal = compute_balances(chain)
         if bal is None:
             print("[balance] CHAIN VIOLATES ECONOMIC RULES"); sys.exit(1)
         names = {w["address"]: n for n, w in load_wallets().items()}
         for addr, amount in sorted(bal.items(), key=lambda x: -x[1]):
-            print(f"  {names.get(addr, addr[:16] + '...'):>12} : {amount}")
+            print(f"  {names.get(addr, addr[:16] + '...'):>12} : {fmt_gly(amount)} GLY")
     elif cmd == "verify":
         print(f"[node] verifying {len(chain)-1} blocks ...")
         ok = verify_chain(chain)

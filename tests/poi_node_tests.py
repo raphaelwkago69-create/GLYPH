@@ -109,10 +109,10 @@ check("inflated coinbase rejected", N.compute_balances(bad) is None)
 print("\n" + "=" * 70)
 print("T6b HALVING: pre-halving reward claimed after the halving height")
 print("=" * 70)
-check("halving schedule: 7 -> 3 -> 1 -> 0",
+check("halving schedule: 700 -> 350 -> 175 units, 0 after era 10",
       [N.block_reward(0), N.block_reward(N.HALVING_INTERVAL),
        N.block_reward(2 * N.HALVING_INTERVAL),
-       N.block_reward(3 * N.HALVING_INTERVAL)] == [7, 3, 1, 0])
+       N.block_reward(10 * N.HALVING_INTERVAL)] == [700, 350, 175, 0])
 _saved_interval = N.HALVING_INTERVAL
 N.HALVING_INTERVAL = 4          # pretend the halving landed inside our chain
 check("stale full-reward coinbase rejected post-halving",
