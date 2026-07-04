@@ -46,6 +46,11 @@ def block_reward(height):
 TARGET_BLOCK_TIME  = 20          # seconds (demo value)
 RETARGET_INTERVAL  = 5           # blocks
 MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
+# Known public nodes tried automatically before mining on a fresh chain.
+# Extend via env: POI_SEEDS="http://host:9401,http://host2:9401"
+SEED_NODES = [s for s in os.environ.get("POI_SEEDS", "").split(",") if s] or [
+    "http://192.168.100.9:9401",   # founder node (LAN; replace with public
+]                                  # addresses as community seeds appear)
 GENESIS_TARGET     = int("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 MAX_ATTEMPTS       = 200000
 # POI_PREFIX lets two nodes run from the same folder without clobbering
@@ -428,6 +433,25 @@ def main():
         w = make_wallet(sys.argv[2])
         print(f"[wallet] '{sys.argv[2]}' address: {w['address']}")
     elif cmd == "mine":
+        if len(chain) == 1:
+            # Fresh chain: try to join the real network before mining alone.
+            print("[node] fresh chain detected — trying seed nodes ...")
+            for seed in SEED_NODES:
+                try:
+                    sync(seed)
+                    chain = load_chain()
+                    if len(chain) > 1:
+                        break
+                except Exception as e:
+                    print(f"[node] seed {seed} unreachable ({e})")
+            if len(chain) == 1 and os.environ.get("POI_NEW_CHAIN") != "1":
+                print("=" * 70)
+                print("WARNING: no seed node reachable. Mining now would start a")
+                print("NEW ISOLATED CHAIN, not the real Glyph network. If that is")
+                print("really what you want, set POI_NEW_CHAIN=1 and rerun.")
+                print("Otherwise: poi_node.py sync http://<known-node>:9401 first.")
+                print("=" * 70)
+                sys.exit(1)
         n = int(sys.argv[2]) if len(sys.argv) > 2 else 1
         wname = sys.argv[3] if len(sys.argv) > 3 else "miner"
         w = make_wallet(wname)
