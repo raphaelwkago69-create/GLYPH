@@ -15,6 +15,7 @@ Upgrades over poi_chain.py v0.1:
   * Fork resolution by cumulative work (most-work chain wins, not longest)
 
 CLI:
+  python poi_node.py run [wallet] [port]  FULL NODE: serve + mine + gossip
   python poi_node.py wallet NAME          create/show wallet NAME
   python poi_node.py mine N [wallet]      mine N blocks, rewards to wallet
   python poi_node.py send FROM TO AMOUNT  queue a signed transaction
@@ -55,12 +56,18 @@ SEED_NODES = [s for s in os.environ.get("POI_SEEDS", "").split(",") if s] or [
 ]
 GENESIS_TARGET     = int("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 MAX_ATTEMPTS       = 200000
+# Gossip: mining runs in chunks of this many attempts; between chunks the
+# node checks peers/inbox so it never grinds long on a stale tip.
+GOSSIP_CHUNK       = int(os.environ.get("POI_CHUNK", "150"))
+MAX_SYNC_BYTES     = 256 * 1024 * 1024   # refuse to download/accept chains above this
 # POI_PREFIX lets two nodes run from the same folder without clobbering
 # each other's files (used by the local two-node test)
 _P = os.environ.get("POI_PREFIX", "")
 CHAIN_FILE   = _P + "poi_chain_v2.json"
 WALLET_FILE  = _P + "poi_wallets.json"
 MEMPOOL_FILE = _P + "poi_mempool.json"
+PEERS_FILE   = _P + "poi_peers.json"
+INBOX_FILE   = _P + "poi_inbox.json"
 
 # ------------------------------------------------------------ model --------
 _model = _tok = _device = None
@@ -297,14 +304,18 @@ field ocean forest desert mountain valley bridge tower engine signal pattern
 memory reason answer question puzzle theory number letter symbol market garden
 window silver golden copper iron ember frost""".split()
 
-def mine_block(chain, miner_addr, transactions=None, quiet=False):
+def mine_block(chain, miner_addr, transactions=None, quiet=False, max_attempts=None):
+    """Mine one block. With max_attempts set (gossip chunk mode), returns
+    None when the budget runs out instead of raising, so the caller can
+    check peers and resume on a possibly-new tip."""
     prev = chain[-1]
     index = prev["index"] + 1
     target = expected_target(chain, index)
     salt = salt_for_block(prev, miner_addr)
     rng = random.Random()
     t0 = time.time()
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    budget = max_attempts or MAX_ATTEMPTS
+    for attempt in range(1, budget + 1):
         prompt = " ".join(rng.choices(VOCAB, k=rng.randint(6, 16)))
         hx = inference_hash(prompt, salt)
         if int(hx, 16) < target:
@@ -323,6 +334,8 @@ def mine_block(chain, miner_addr, transactions=None, quiet=False):
                       f"({dt:.1f}s, {attempt/max(dt,1e-9):.0f} inf/s)  "
                       f"reward {block_reward(index)} -> {miner_addr[:12]}...")
             return block
+    if max_attempts is not None:
+        return None
     raise RuntimeError("MAX_ATTEMPTS exceeded")
 
 # ------------------------------------------------------------ validation ---
@@ -360,6 +373,9 @@ def verify_chain(chain, verbose=True):
             print(f"[verify] block {i}: {'OK' if not errs else 'BAD  <- ' + '; '.join(errs)}")
         if errs:
             ok = False
+            if not verbose:
+                return False   # bail on first bad block: don't burn inference
+                               # verifying the rest of a hostile chain
     if compute_balances(chain) is None:
         if verbose: print("[verify] ECONOMIC RULES VIOLATED (sig/overspend/coinbase)")
         ok = False
@@ -376,10 +392,50 @@ def resolve_fork(local, remote):
     return remote, "adopted remote: more work and fully valid"
 
 # ------------------------------------------------------------ p2p ----------
+def load_peers():
+    if os.path.exists(PEERS_FILE):
+        with open(PEERS_FILE) as f:
+            return json.load(f)
+    return []
+
+def add_peers(urls):
+    peers = load_peers()
+    for u in urls:
+        u = u.rstrip("/")
+        if u and u not in peers:
+            peers.append(u)
+    with open(PEERS_FILE, "w") as f:
+        json.dump(peers, f, indent=1)
+    return peers
+
+def inbox_put(remote_chain):
+    """Keep at most one pending remote chain: the highest-claimed-work one."""
+    if os.path.exists(INBOX_FILE):
+        with open(INBOX_FILE) as f:
+            pending = json.load(f)
+        if chain_work(remote_chain) <= chain_work(pending):
+            return False
+    with open(INBOX_FILE, "w") as f:
+        json.dump(remote_chain, f)
+    return True
+
+def inbox_take():
+    if not os.path.exists(INBOX_FILE):
+        return None
+    with open(INBOX_FILE) as f:
+        pending = json.load(f)
+    os.remove(INBOX_FILE)
+    return pending
+
 def serve(port=9401):
-    """Serve this node's chain over HTTP. GET /chain -> full chain JSON,
-    GET /status -> height + total work + tip hash."""
+    """Serve this node's chain over HTTP.
+    GET  /chain  -> full chain JSON        GET /status -> height/work/tip
+    GET  /peers  -> known peer URLs
+    POST /chain  -> submit a higher-work chain; queued to the inbox and
+                    verified by the mining loop (never inline, so a hostile
+                    submission can't hijack the GPU serving thread)."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             chain = load_chain()
@@ -392,6 +448,8 @@ def serve(port=9401):
                     "tip": chain[-1]["block_hash"],
                     "model": ACTIVE_MODEL,
                     "protocol": PROTOCOL_VERSION}).encode()
+            elif self.path == "/peers":
+                body = json.dumps(load_peers()).encode()
             else:
                 self.send_response(404); self.end_headers(); return
             self.send_response(200)
@@ -399,10 +457,47 @@ def serve(port=9401):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        def do_POST(self):
+            if self.path != "/chain":
+                self.send_response(404); self.end_headers(); return
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= MAX_SYNC_BYTES:
+                self.send_response(413); self.end_headers(); return
+            try:
+                remote = json.loads(self.rfile.read(length))
+                local = load_chain()
+                # cheap gates only -- no inference in the serving thread
+                if remote[0] != local[0]:
+                    verdict, code = "rejected: different genesis", 400
+                elif chain_work(remote) <= chain_work(local):
+                    verdict, code = "rejected: not more work", 200
+                elif inbox_put(remote):
+                    verdict, code = "queued for verification", 202
+                else:
+                    verdict, code = "queued already has higher-work candidate", 200
+            except Exception as e:
+                verdict, code = f"malformed: {e}", 400
+            body = json.dumps({"result": verdict}).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         def log_message(self, fmt, *args):
             print(f"[serve] {self.client_address[0]} {fmt % args}")
-    print(f"[serve] node listening on 0.0.0.0:{port}  (GET /chain, /status)")
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    srv = HTTPServer(("0.0.0.0", port), Handler)
+    print(f"[serve] node listening on 0.0.0.0:{port}  "
+          f"(GET /chain /status /peers, POST /chain)")
+    return srv
+
+def push_chain(peer_url, chain):
+    """Announce our chain to a peer (gossip push). Best-effort."""
+    from urllib.request import urlopen, Request
+    body = json.dumps(chain).encode()
+    req = Request(peer_url.rstrip("/") + "/chain", data=body,
+                  headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(req, timeout=30) as r:
+        return json.load(r).get("result", "")
 
 def sync(peer_url):
     """Fetch the peer's chain, fully verify it (one inference per block),
@@ -413,11 +508,20 @@ def sync(peer_url):
         st = json.load(r)
     print(f"[sync] peer height={st['height']} tip={st['tip'][:16]}... "
           f"model={st['model']}")
+    add_peers([peer_url])
+    try:  # peer-list exchange (Bitcoin's addr gossip, pull flavor)
+        with urlopen(peer_url + "/peers", timeout=10) as r:
+            add_peers(json.load(r))
+    except Exception:
+        pass
     local = load_chain()
     if st["tip"] == local[-1]["block_hash"]:
         print("[sync] already in sync"); return "in-sync"
     with urlopen(peer_url + "/chain", timeout=60) as r:
-        remote = json.load(r)
+        raw = r.read(MAX_SYNC_BYTES + 1)
+    if len(raw) > MAX_SYNC_BYTES:
+        print("[sync] rejected: peer chain exceeds size cap"); return "too-big"
+    remote = json.loads(raw)
     print(f"[sync] fetched {len(remote)-1} blocks; verifying "
           f"(re-running {len(remote)-1} inferences) ...")
     kept, why = resolve_fork(local, remote)
@@ -426,6 +530,64 @@ def sync(peer_url):
         save_chain(remote)
         print(f"[sync] local chain now height {len(remote)-1}")
     return why
+
+def gossip_run(wallet_name, port=9401):
+    """Full node: serve + mine + gossip in one process.
+    Mines in GOSSIP_CHUNK-attempt slices; between slices it (a) adopts any
+    verified higher-work chain from the POST inbox, (b) polls peers' /status
+    and pulls if someone is ahead, so it never mines long on a stale tip.
+    Winning a block pushes the chain to every known peer."""
+    import threading
+    w = make_wallet(wallet_name)
+    srv = serve(port)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    peers = add_peers(SEED_NODES)
+    chain = load_chain()
+    if len(chain) == 1:
+        for p in peers:
+            try:
+                sync(p); chain = load_chain()
+                if len(chain) > 1: break
+            except Exception as e:
+                print(f"[run] seed {p} unreachable ({e})")
+        if len(chain) == 1 and os.environ.get("POI_NEW_CHAIN") != "1":
+            print("[run] no seed reachable; refusing to start a new isolated "
+                  "chain (set POI_NEW_CHAIN=1 to do that deliberately)")
+            sys.exit(1)
+    last_poll = 0.0
+    print(f"[run] mining to '{wallet_name}' ({w['address'][:12]}...), "
+          f"gossiping with {len(load_peers())} peer(s)")
+    while True:
+        # 1. adopt anything a peer pushed to us (verify OUR side, one thread)
+        pending = inbox_take()
+        if pending is not None:
+            kept, why = resolve_fork(chain, pending)
+            print(f"[run] inbox: {why}")
+            if kept is pending:
+                chain = pending; save_chain(chain)
+        # 2. every ~20s, ask peers if someone is ahead; pull if so
+        if time.time() - last_poll > 20:
+            last_poll = time.time()
+            from urllib.request import urlopen
+            for p in list(load_peers()):
+                try:
+                    with urlopen(p + "/status", timeout=5) as r:
+                        st = json.load(r)
+                    if int(st["work"]) > chain_work(chain):
+                        sync(p); chain = load_chain()
+                except Exception:
+                    pass
+        # 3. mine a slice on the current tip
+        block = mine_block(chain, w["address"], transactions=load_mempool(),
+                           max_attempts=GOSSIP_CHUNK)
+        if block is not None:
+            chain.append(block); save_chain(chain)
+            save_mempool([])
+            for p in list(load_peers()):
+                try:
+                    print(f"[run] push -> {p}: {push_chain(p, chain)}")
+                except Exception:
+                    pass
 
 # ------------------------------------------------------------ cli ----------
 def main():
@@ -493,9 +655,13 @@ def main():
         print(f"[node] CHAIN {'VALID' if ok else 'INVALID'}")
         sys.exit(0 if ok else 1)
     elif cmd == "serve":
-        serve(int(sys.argv[2]) if len(sys.argv) > 2 else 9401)
+        serve(int(sys.argv[2]) if len(sys.argv) > 2 else 9401).serve_forever()
     elif cmd == "sync":
         sync(sys.argv[2])
+    elif cmd == "run":
+        wname = sys.argv[2] if len(sys.argv) > 2 else "miner"
+        port = int(sys.argv[3]) if len(sys.argv) > 3 else 9401
+        gossip_run(wname, port)
     elif cmd == "show":
         for b in chain:
             ntx = len(b["transactions"])

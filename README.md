@@ -78,8 +78,17 @@ readable by a human or an AI assistant.
 The founder seed node is currently at:
 `https://pittsburgh-serving-accountability-geo.trycloudflare.com`
 (temporary tunnel URL — if unreachable, check this README's latest version
-or open an issue). `python src/poi_node.py mine 100 yourname` will sync from
-it automatically before mining; blocks you win pay your own wallet.
+or open an issue). To join as a full node (serve + mine + gossip in one):
+
+```
+python src/poi_node.py run yourname
+```
+
+It syncs from the seed automatically (verifying every block with its own
+inference), then mines in gossip mode: your wins are pushed to peers, their
+wins are pulled, and the network converges on the most-work chain
+(`tests/gossip_test.py` demonstrates two competing miners converging).
+Blocks you win pay your own local wallet.
 
 ## Tokenomics
 
