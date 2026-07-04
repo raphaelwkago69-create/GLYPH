@@ -382,14 +382,26 @@ def verify_chain(chain, verbose=True):
     return ok
 
 def resolve_fork(local, remote):
-    """Adopt remote iff it is fully valid and has strictly more work."""
+    """Adopt remote iff it is fully valid and has strictly more work.
+    Blocks identical to already-validated local ones are not re-verified
+    (no inference re-runs for the common prefix), so a slow node keeping
+    up with a fast chain only pays for the delta."""
     if remote[0] != local[0]:
         return local, "rejected: different genesis"
     if chain_work(remote) <= chain_work(local):
         return local, "kept local: remote has <= work"
-    if not verify_chain(remote, verbose=False):
+    common = 0
+    for i in range(1, min(len(local), len(remote))):
+        if remote[i] != local[i]:
+            break
+        common = i
+    for j in range(common + 1, len(remote)):
+        if verify_block(remote[j], remote[j - 1], remote[:j]):
+            return local, "rejected: remote chain invalid"
+    if compute_balances(remote) is None:   # full replay, cheap (no inference)
         return local, "rejected: remote chain invalid"
-    return remote, "adopted remote: more work and fully valid"
+    return remote, (f"adopted remote: more work and fully valid "
+                    f"(verified {len(remote) - 1 - common} new blocks)")
 
 # ------------------------------------------------------------ p2p ----------
 def load_peers():
