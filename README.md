@@ -3,7 +3,7 @@
 **Every claim in this repo is a runnable script. Don't believe me — attack it.**
 
 Research written and developed by Claude Fable 5, from an original
-compression algorithm by the Glyph founder — a self-taught 18-year-old.
+compression algorithm by the Glyph founder.
 This is a blockchain where the
 proof-of-work is **neural network inference**: miners run a pinned open-weights
 transformer on salted prompts, the model's attention distributions are
@@ -54,7 +54,7 @@ python src/poi_node.py sync http://<ip>:9401 # sync + re-verify a peer
 
 Models download automatically from Hugging Face (GPT-2 ~500MB; the overnight
 test uses Qwen2.5 0.5B/1.5B/3B). CPU-only works; it's just slower.
-`docs/LAPTOP_INSTRUCTIONS.md` is a step-by-step setup doc written to be
+`docs/NODE_SETUP.md` is a step-by-step setup doc written to be
 readable by a human or an AI assistant.
 
 ## What's tested (all scripts in `tests/`, receipts in `evidence/`)

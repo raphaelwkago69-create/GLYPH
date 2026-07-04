@@ -1,18 +1,18 @@
-"""
+﻿"""
 OVERNIGHT LARGE-MODEL TEST
 Part 1: GPU-vs-CPU determinism cross-check on Qwen2.5-0.5B (fp32 both).
 Part 2: Full quality suite on Qwen2.5-1.5B (CPU fp32): fingerprint space,
         noise survival, mining speed.
 Part 3: (best effort) Qwen2.5-3B mini quality suite; skipped gracefully if
         RAM is insufficient.
-Everything logged to overnight_results.txt as it goes.
+Everything logged to scale_test_results.txt as it goes.
 """
 import hashlib, json, math, random, sys, time, traceback
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 GRID = 100; N_FP_HEADS = 6
-LOG = open("overnight_results.txt", "a", buffering=1)
+LOG = open("scale_test_results.txt", "a", buffering=1)
 def log(msg):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     print(line); LOG.write(line + "\n")
