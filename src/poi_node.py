@@ -48,12 +48,26 @@ TARGET_BLOCK_TIME  = 20          # seconds (demo value)
 RETARGET_INTERVAL  = 5           # blocks
 MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
 # Known public nodes tried automatically before mining on a fresh chain.
-# Extend via env: POI_SEEDS="http://host:9401,http://host2:9401"
-SEED_NODES = [s for s in os.environ.get("POI_SEEDS", "").split(",") if s] or [
-    # founder node (tunnel URL may rotate; check the README for current seeds)
-    "https://pittsburgh-serving-accountability-geo.trycloudflare.com",
-    "http://192.168.100.9:9401",   # founder node, LAN only
-]
+# Priority: POI_SEEDS env var > live SEEDS.txt on GitHub > baked-in fallback.
+# The GitHub fetch means seed URLs can be updated for all future nodes by
+# editing one file in the repo — no code re-download needed.
+SEEDS_URL = ("https://raw.githubusercontent.com/raphaelwkago69-create/"
+             "GLYPH/main/SEEDS.txt")
+def _live_seeds():
+    try:
+        from urllib.request import urlopen
+        with urlopen(SEEDS_URL, timeout=10) as r:
+            lines = r.read(65536).decode().splitlines()
+        return [l.strip() for l in lines if l.strip() and not l.startswith("#")]
+    except Exception:
+        return []
+def get_seed_nodes():
+    env = [s for s in os.environ.get("POI_SEEDS", "").split(",") if s]
+    return env or _live_seeds() or [
+        # baked-in fallback (tunnel URL may rotate; SEEDS.txt is the live list)
+        "https://pittsburgh-serving-accountability-geo.trycloudflare.com",
+        "http://192.168.100.9:9401",   # founder node, LAN only
+    ]
 GENESIS_TARGET     = int("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 MAX_ATTEMPTS       = 200000
 # Gossip: mining runs in chunks of this many attempts; between chunks the
@@ -553,7 +567,7 @@ def gossip_run(wallet_name, port=9401):
     w = make_wallet(wallet_name)
     srv = serve(port)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    peers = add_peers(SEED_NODES)
+    peers = add_peers(get_seed_nodes())
     chain = load_chain()
     if len(chain) == 1:
         for p in peers:
@@ -612,7 +626,7 @@ def main():
         if len(chain) == 1:
             # Fresh chain: try to join the real network before mining alone.
             print("[node] fresh chain detected — trying seed nodes ...")
-            for seed in SEED_NODES:
+            for seed in get_seed_nodes():
                 try:
                     sync(seed)
                     chain = load_chain()
