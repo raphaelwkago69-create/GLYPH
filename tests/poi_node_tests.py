@@ -41,7 +41,7 @@ print("T1  HONEST CHAIN VERIFIES")
 print("=" * 70)
 check("full verification (8 inference re-runs)", N.verify_chain(chain, verbose=False))
 bal = N.compute_balances(chain)
-check("alice earned 8 block rewards", bal.get(alice["address"]) == 8 * N.BLOCK_REWARD,
+check("alice earned 8 block rewards", bal.get(alice["address"]) == 8 * N.block_reward(1),
       f"balance={bal.get(alice['address'])}")
 
 print("\n" + "=" * 70)
@@ -55,7 +55,7 @@ chain.append(block)
 bal = N.compute_balances(chain)
 check("chain still valid", N.verify_chain(chain, verbose=False))
 check("bob received 30", bal.get(bob["address"]) == 30)
-check("alice debited", bal.get(alice["address"]) == 9 * N.BLOCK_REWARD - 30)
+check("alice debited", bal.get(alice["address"]) == 9 * N.block_reward(1) - 30)
 
 print("\n" + "=" * 70)
 print("T3  FORGED SIGNATURE: eve signs a tx spending ALICE's coins")
@@ -101,10 +101,25 @@ print("T6  COINBASE FRAUD: miner pays themselves double reward")
 print("=" * 70)
 bad = copy.deepcopy(chain)
 blk = N.mine_block(bad, eve["address"], quiet=True)
-blk["transactions"][0]["amount"] = N.BLOCK_REWARD * 2
+blk["transactions"][0]["amount"] = N.block_reward(blk["index"]) * 2
 blk["block_hash"] = N.block_header_hash(blk)   # re-seal header honestly
 bad.append(blk)
 check("inflated coinbase rejected", N.compute_balances(bad) is None)
+
+print("\n" + "=" * 70)
+print("T6b HALVING: pre-halving reward claimed after the halving height")
+print("=" * 70)
+check("halving schedule: 7 -> 3 -> 1 -> 0",
+      [N.block_reward(0), N.block_reward(N.HALVING_INTERVAL),
+       N.block_reward(2 * N.HALVING_INTERVAL),
+       N.block_reward(3 * N.HALVING_INTERVAL)] == [7, 3, 1, 0])
+_saved_interval = N.HALVING_INTERVAL
+N.HALVING_INTERVAL = 4          # pretend the halving landed inside our chain
+check("stale full-reward coinbase rejected post-halving",
+      N.compute_balances(chain) is None)
+N.HALVING_INTERVAL = _saved_interval
+check("chain valid again with real halving interval",
+      N.compute_balances(chain) is not None)
 
 print("\n" + "=" * 70)
 print("T7  PROOF THEFT: eve steals alice's winning prompt for herself")

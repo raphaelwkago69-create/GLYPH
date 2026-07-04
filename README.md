@@ -73,6 +73,14 @@ readable by a human or an AI assistant.
 - **Challenger duels** — logit-domain quantization, origin-notebook rules,
   and other "smarter" variants all lost to the shipped design on real data.
 
+## Tokenomics
+
+- Block reward: **7 GLY**, block target: **20 seconds**
+- Halving every **1,500,000 blocks** (~once a year): 7 → 3 → 1 → 0
+- Total supply converges below **21,000,000 GLY**
+- Validators enforce the height-correct reward — a coinbase claiming a
+  pre-halving reward after the halving height is an invalid block (tested)
+
 ## Honest limitations (whitepaper §5)
 
 1. Verification costs one inference → DoS surface (fees/stake/checkpoints TBD).

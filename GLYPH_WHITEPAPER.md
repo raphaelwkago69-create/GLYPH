@@ -110,9 +110,13 @@ re-derives everything, so forged scores cannot enter the system.
 
 Difficulty is a numeric target (hash < target) recomputed deterministically
 from chain timestamps every 5 blocks toward a target block time, clamped to
-4× per adjustment (Bitcoin-style). Blocks carry a fixed coinbase reward to
-the miner plus ECDSA-signed transactions with per-sender nonces (replay
-protection). Fork choice is most-cumulative-work among fully valid chains.
+4× per adjustment (Bitcoin-style). Blocks carry a coinbase reward of 7 GLY,
+halving every 1,500,000 blocks (roughly yearly at the 20-second block
+target): 7 → 3 → 1 → 0, so total supply converges below 21,000,000 GLY —
+validators enforce the height-correct reward, so a stale reward claim is an
+invalid block. Blocks also carry ECDSA-signed transactions with per-sender
+nonces (replay protection). Fork choice is most-cumulative-work among fully
+valid chains.
 
 ### 2.7 Model governance
 

@@ -36,7 +36,13 @@ MODEL_REGISTRY = {
 ACTIVE_MODEL       = "gpt2"
 GRID               = 100
 N_FP_HEADS         = 6
-BLOCK_REWARD       = 6
+INITIAL_REWARD     = 7           # halves every HALVING_INTERVAL blocks
+HALVING_INTERVAL   = 1_500_000   # ~347 days at 20s blocks; supply -> 21M GLY
+
+def block_reward(height):
+    """Coinbase reward at a given block height. 7 -> 3 -> 1 -> 0 (integer
+    halving); total supply converges below 21,000,000 GLY."""
+    return INITIAL_REWARD >> (height // HALVING_INTERVAL)
 TARGET_BLOCK_TIME  = 20          # seconds (demo value)
 RETARGET_INTERVAL  = 5           # blocks
 MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
@@ -233,7 +239,7 @@ def compute_balances(chain, upto=None):
         if not txs or txs[0].get("type") != "coinbase":
             return None
         cb = txs[0]
-        if cb["amount"] != BLOCK_REWARD or cb["to"] != block["miner"]:
+        if cb["amount"] != block_reward(block["index"]) or cb["to"] != block["miner"]:
             return None
         bal[cb["to"]] = bal.get(cb["to"], 0) + cb["amount"]
         for tx in txs[1:]:
@@ -295,7 +301,7 @@ def mine_block(chain, miner_addr, transactions=None, quiet=False):
         prompt = " ".join(rng.choices(VOCAB, k=rng.randint(6, 16)))
         hx = inference_hash(prompt, salt)
         if int(hx, 16) < target:
-            coinbase = {"type": "coinbase", "to": miner_addr, "amount": BLOCK_REWARD}
+            coinbase = {"type": "coinbase", "to": miner_addr, "amount": block_reward(index)}
             block = {"version": PROTOCOL_VERSION, "index": index,
                      "prev_hash": prev["block_hash"],
                      "timestamp": int(time.time()),
@@ -308,7 +314,7 @@ def mine_block(chain, miner_addr, transactions=None, quiet=False):
                 dt = time.time() - t0
                 print(f"[mine] block {index}: won in {attempt} attempts "
                       f"({dt:.1f}s, {attempt/max(dt,1e-9):.0f} inf/s)  "
-                      f"reward {BLOCK_REWARD} -> {miner_addr[:12]}...")
+                      f"reward {block_reward(index)} -> {miner_addr[:12]}...")
             return block
     raise RuntimeError("MAX_ATTEMPTS exceeded")
 
