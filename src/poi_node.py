@@ -73,7 +73,6 @@ def get_seed_nodes():
     return env or _live_seeds() or [
         # baked-in fallback (tunnel URL may rotate; SEEDS.txt is the live list)
         "https://pittsburgh-serving-accountability-geo.trycloudflare.com",
-        "http://192.168.100.9:9401",   # founder node, LAN only
     ]
 GENESIS_TARGET     = int("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 MAX_ATTEMPTS       = 200000
