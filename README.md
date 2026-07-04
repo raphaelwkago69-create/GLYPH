@@ -73,6 +73,14 @@ readable by a human or an AI assistant.
 - **Challenger duels** — logit-domain quantization, origin-notebook rules,
   and other "smarter" variants all lost to the shipped design on real data.
 
+## Join the live network
+
+The founder seed node is currently at:
+`https://pittsburgh-serving-accountability-geo.trycloudflare.com`
+(temporary tunnel URL — if unreachable, check this README's latest version
+or open an issue). `python src/poi_node.py mine 100 yourname` will sync from
+it automatically before mining; blocks you win pay your own wallet.
+
 ## Tokenomics
 
 - Block reward: **7 GLY**, block target: **20 seconds**

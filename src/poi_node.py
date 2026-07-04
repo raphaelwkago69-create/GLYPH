@@ -49,8 +49,10 @@ MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
 # Known public nodes tried automatically before mining on a fresh chain.
 # Extend via env: POI_SEEDS="http://host:9401,http://host2:9401"
 SEED_NODES = [s for s in os.environ.get("POI_SEEDS", "").split(",") if s] or [
-    "http://192.168.100.9:9401",   # founder node (LAN; replace with public
-]                                  # addresses as community seeds appear)
+    # founder node (tunnel URL may rotate; check the README for current seeds)
+    "https://pittsburgh-serving-accountability-geo.trycloudflare.com",
+    "http://192.168.100.9:9401",   # founder node, LAN only
+]
 GENESIS_TARGET     = int("0fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 16)
 MAX_ATTEMPTS       = 200000
 # POI_PREFIX lets two nodes run from the same folder without clobbering
