@@ -36,11 +36,19 @@ _opener.addheaders = [("User-Agent", "glyph-node/0.3")]
 _urlreq.install_opener(_opener)
 
 # ------------------------------------------------------------ protocol -----
-PROTOCOL_VERSION = 3
+# v4: proof switched to the integer-only engine (int_infer.py). Fingerprints
+# are exact integer arithmetic end to end, so the proof hash is bit-identical
+# on every device BY CONSTRUCTION -- the v3 cross-hardware boundary flip
+# (mainnet block 1693) is impossible in this protocol.
+PROTOCOL_VERSION = 4
 MODEL_REGISTRY = {
     # vetted by audit (determinism / fingerprint-space / cost benchmarks);
-    # additions require a protocol version bump adopted by the whole network
-    "gpt2": {"layers": 12, "heads": 12, "tier": 1},
+    # additions require a protocol version bump adopted by the whole network.
+    # int_weights_hash pins the deterministic float->integer weight
+    # conversion: a node whose converted weights hash differently is running
+    # different weights and must not mine on them.
+    "gpt2": {"layers": 12, "heads": 12, "tier": 1,
+             "int_weights_hash": "842a00bc8f09c1e6eb870e750deaa49159dd45fb9ab860fc8f40bef6878029ac"},
 }
 ACTIVE_MODEL       = "gpt2"
 GRID               = 100
@@ -97,90 +105,27 @@ MEMPOOL_FILE = _P + "poi_mempool.json"
 PEERS_FILE   = _P + "poi_peers.json"
 INBOX_FILE   = _P + "poi_inbox.json"
 
-# ------------------------------------------------------------ model --------
-_model = _tok = _device = None
+# ------------------------------------------- model + fingerprint (v4) ------
+# The float model and float fingerprint path are GONE from consensus.
+# int_infer.py runs GPT-2 in exact integer arithmetic; heads_for_salt, the
+# GRID quantizer and glyph compression live there (same GRID / N_FP_HEADS
+# protocol constants as above).
+import int_infer
+
+heads_for_salt = int_infer.heads_for_salt   # re-export for tools/tests
+
 def load_model():
-    global _model, _tok, _device
-    if _model is not None:
-        return
-    import torch
-    from transformers import GPT2LMHeadModel, GPT2Tokenizer
-    _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"[node] loading {ACTIVE_MODEL} on {_device} ...")
-    _model = GPT2LMHeadModel.from_pretrained("gpt2", output_attentions=True)
-    _model.eval()
-    _model = _model.to(_device)
-    _tok = GPT2Tokenizer.from_pretrained("gpt2")
-
-# ------------------------------------------------- fingerprint core --------
-def quantize_int(scores, grid=GRID):
-    raw = [s * grid for s in scores]
-    floor = [math.floor(r) for r in raw]
-    remainder = grid - sum(floor)
-    if remainder > 0:
-        fr = sorted(range(len(raw)), key=lambda i: (raw[i] - floor[i], -i), reverse=True)
-        for k in range(remainder): floor[fr[k % len(fr)]] += 1
-    elif remainder < 0:
-        fr = sorted(range(len(raw)), key=lambda i: (raw[i] - floor[i], -i))
-        for k in range(-remainder): floor[fr[k % len(fr)]] -= 1
-    return floor
-
-def compress_glyphs_int(int_scores):
-    vals = list(int_scores)
-    med = sorted(vals)[len(vals) // 2]
-    typs = ['R' if v > med else 'G' for v in vals]
-    glyphs = []; level = 0
-    while len(vals) > 1:
-        level += 1; n = len(vals)
-        order = sorted(range(n), key=lambda i: (vals[i], -i), reverse=True)
-        sv = [vals[i] for i in order]; st = [typs[i] for i in order]
-        if n % 2 == 0:
-            seq_v, seq_t = sv, st
-            pairs = [(i, i + 1) for i in range(0, n, 2)]
-        else:
-            lv, lt, rv, rt = [], [], [], []
-            for i in range(n):
-                (lv if i % 2 == 0 else rv).append(sv[i])
-                (lt if i % 2 == 0 else rt).append(st[i])
-            seq_v = lv + rv[::-1]; seq_t = lt + rt[::-1]
-            pairs = [(i, i + 1) for i in range(n - 1)]
-        nv, nt = [], []
-        for i, j in pairs:
-            a, b, ta, tb = seq_v[i], seq_v[j], seq_t[i], seq_t[j]
-            if ta == tb and ta != 'X': t = ta
-            elif 'X' in (ta, tb):     t = 'R'
-            else:                     t = 'X'
-            nv.append(a + b); nt.append(t)
-        reg = [(v, t) for v, t in zip(nv, nt) if t != 'X']
-        gly = [v for v, t in zip(nv, nt) if t == 'X']
-        for gv in gly: glyphs.append((level, gv))
-        if reg:
-            vals = [v for v, _ in reg]; typs = [t for _, t in reg]
-        else:
-            vals, typs = nv, nt
-    return (vals[0] if vals else 0), tuple(glyphs)
-
-def heads_for_salt(salt, model_id=ACTIVE_MODEL, k=N_FP_HEADS):
-    spec = MODEL_REGISTRY[model_id]
-    h = hashlib.sha256(salt.encode()).digest()
-    rng = random.Random(int.from_bytes(h, 'big'))
-    pairs = [(l, hd) for l in range(spec["layers"]) for hd in range(spec["heads"])]
-    return tuple(sorted(rng.sample(pairs, k)))
+    int_infer.load_model()
+    want = MODEL_REGISTRY[ACTIVE_MODEL]["int_weights_hash"]
+    if int_infer.WEIGHTS_HASH != want:
+        raise RuntimeError(
+            "integer weight conversion mismatch: got "
+            f"{int_infer.WEIGHTS_HASH}, protocol pins {want} -- "
+            "your gpt2 download is not the vetted one")
 
 def inference_hash(prompt, salt):
-    import torch
     load_model()
-    heads = heads_for_salt(salt)
-    inputs = _tok(f"{salt} {prompt}", return_tensors="pt").to(_device)
-    with torch.no_grad():
-        out = _model(**inputs, output_attentions=True)
-    parts = []
-    for (layer, head) in heads:
-        row = out.attentions[layer][0, head, -1].cpu().tolist()
-        B, gl = compress_glyphs_int(quantize_int(row))
-        parts.append((layer, head, B, gl))
-    fp = json.dumps(parts, separators=(',', ':'))
-    return hashlib.sha256((salt + '|' + fp).encode()).hexdigest()
+    return int_infer.inference_hash(prompt, salt)
 
 # ------------------------------------------------------------ wallets ------
 import ecdsa

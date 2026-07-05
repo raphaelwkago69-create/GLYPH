@@ -21,8 +21,22 @@ these bit-for-bit on your machine:
 
 | Test | Golden hash |
 |---|---|
-| `tests/hardened_cross_hardware.py` (GPT-2, 100 salted prompts) | `976d83a93a1d7149d0c0eeebefa30ee6cd31514b8e4f3c60468d0498ee237449` |
-| `tests/overnight_large_model_test.py` (Qwen2.5-0.5B) | `a70857ff8ead5bdac2d0dd8377a6775c71fa878dcbda892db5295eb83744474d` |
+| **`tests/int_cross_hardware.py` (protocol v4, integer engine, 100 salted prompts)** | `e82749818d566719fd311d171ab2f277697c71887d68b263027072422035937c` |
+| `tests/hardened_cross_hardware.py` (legacy v3 float pipeline) | `976d83a93a1d7149d0c0eeebefa30ee6cd31514b8e4f3c60468d0498ee237449` |
+| `tests/overnight_large_model_test.py` (Qwen2.5-0.5B, float) | `a70857ff8ead5bdac2d0dd8377a6775c71fa878dcbda892db5295eb83744474d` |
+
+**Protocol v4 (2026-07-05): determinism is now mathematical, not empirical.**
+The v3 float pipeline was deterministic in every test we ran — until live
+mainnet block 1693, where a quantization-boundary flip made the block verify
+on GPU but fail on CPU (the exact failure mode documented as limitation #2 of
+the v3 whitepaper, at almost exactly the predicted rate). Rather than patch
+around it with trusted checkpoints, the network restarted on **v4: an
+integer-only inference engine** (`src/int_infer.py`). Every consensus
+operation is exact integer arithmetic (fixed-point activations, integer
+layernorm/softmax/GELU, matmuls whose float64 partial sums are provably exact
+integers), so the proof hash is bit-identical on any chip *by construction*.
+Re-running all 2,450 v3 mainnet blocks through the integer engine: GPU vs CPU,
+2,450/2,450 identical — including block 1693.
 
 So far matched on: NVIDIA GTX 1650 (CUDA 12.1, Python 3.12), Intel i3 CPU
 (Python 3.14), and a second physical machine — an Intel laptop (Python 3.11,
@@ -33,9 +47,10 @@ over Wi-Fi.
 
 Salt = H(previous_block_hash ‖ miner_address) — so proofs can't be precomputed
 or stolen. The salt plus a random-word prompt is fed to the pinned model; 6
-salt-selected attention heads are extracted; each row is integer-quantized on
-a fixed grid (largest-remainder apportionment, GRID=100) so sub-grid float
-drift between hardware is absorbed; each quantized row goes through the glyph
+salt-selected attention heads are extracted from an **integer-only forward
+pass** (v4: there is no float in the consensus path, so there is no
+cross-hardware drift to absorb); each row is integer-quantized on a fixed
+grid (largest-remainder apportionment, GRID=100); each row goes through the glyph
 cascade (median R/G typing, descending pairing, palindrome on odd counts,
 per-level glyph extraction, final B); SHA-256(salt | fingerprint) under the
 numeric target wins the block. **Verification costs exactly one inference.**
@@ -45,8 +60,8 @@ Miners submit prompts, never scores — a verifier recomputes everything.
 
 ```
 pip install -r requirements.txt
-python tests/hardened_cross_hardware.py      # expect 976d83a9...
-python tests/poi_node_tests.py               # 18 adversarial tests
+python tests/int_cross_hardware.py           # expect e8274981... (v4)
+python tests/poi_node_tests.py               # 21 adversarial tests
 python src/poi_node.py mine                  # mine on a local chain
 python src/poi_node.py serve 9401            # serve your chain
 python src/poi_node.py sync http://<ip>:9401 # sync + re-verify a peer
@@ -105,7 +120,9 @@ Blocks you win pay your own local wallet.
 ## Honest limitations (whitepaper §5)
 
 1. Verification costs one inference → DoS surface (fees/stake/checkpoints TBD).
-2. Determinism is empirical, not definitional (endgame: integer int8 inference).
+2. ~~Determinism is empirical, not definitional~~ **Fixed in v4**: the integer
+   engine makes determinism definitional. (The v3 float pipeline hit exactly
+   this failure at live block 1693 — see the v4 note above.)
 3. The model registry is a permanent governance surface.
 4. GPU attack hardware is rentable — young-network 51% risk.
 5. Zero years of live adversarial history; the network is 2 nodes.

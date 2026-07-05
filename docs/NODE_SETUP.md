@@ -48,13 +48,14 @@ after every block; restart with the same command to continue.
 
 ## Optional: verify the science first
 ```
-python tests/hardened_cross_hardware.py
+python tests/int_cross_hardware.py
 ```
 must print ultimate hash
-`976d83a93a1d7149d0c0eeebefa30ee6cd31514b8e4f3c60468d0498ee237449` —
-bit-for-bit identical on every machine ever tested. If yours differs,
-please open an issue with the hash and your hardware; you may have found
-the first diverging silicon.
+`e82749818d566719fd311d171ab2f277697c71887d68b263027072422035937c` —
+bit-for-bit identical on every machine, by construction (protocol v4 runs
+the model in exact integer arithmetic; there is no float in the consensus
+path). If yours differs, your GPT-2 download is not the vetted one — the
+node will also refuse to start, printing a weight-hash mismatch.
 ```
 python tests/poi_node_tests.py
 ```

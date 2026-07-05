@@ -278,15 +278,21 @@ rehearsal, demonstrated every network property end to end:
 
 ## 5. Honest Limitations and Open Problems
 
-1. **Determinism is empirical, not proven.** Bitcoin's inputs are bytes;
-   ours are measurements. Quantization makes cross-hardware disagreement
-   rare (zero observed), not impossible. A value lying exactly on a grid
-   boundary could flip. Mitigations: per-block miner loss (an ambiguous
-   proof is simply invalid; consensus is unaffected), grid coarsening
-   dials, and — the endgame — fully integer (int8) inference pinned by
-   protocol, making determinism definitional. AMD and Apple Silicon are
-   untested as of this draft; the test suite localizes any divergence to
-   specific prompts, floats, and grid sizes.
+1. **Determinism is empirical, not proven — RESOLVED in protocol v4.**
+   This limitation was real and it fired: live v3 mainnet block 1693 landed
+   on a quantization boundary and verified on GPU while failing on CPU
+   (1 block in 2,423 — almost exactly the ~4-in-100k boundary-flip rate this
+   section predicted). Because blocks are chained, one divergent block made
+   the whole suffix unverifiable on CPU. The fix was the endgame this
+   section named: protocol v4 replaces the float forward pass with an
+   **integer-only engine** (`src/int_infer.py`) — fixed-point int64
+   activations, integer layernorm/softmax/GELU built from hardcoded integer
+   constants (no libm), and matrix multiplies whose float64 partial sums
+   are provably exact integers (bounded < 2^53, so IEEE-754 makes every
+   operation exact in any order on any chip). Determinism is now
+   definitional: re-running all 2,450 v3 blocks GPU-vs-CPU under v4 gives
+   2,450/2,450 identical hashes, including block 1693. The integer weight
+   conversion is pinned by hash in the model registry.
 2. **Verification-cost DoS.** Verifying costs one inference (seconds on
    CPU), vastly more than Bitcoin's microsecond hash check. Spam of invalid
    proofs is a real surface; mitigations (verification fees, peer scoring,
