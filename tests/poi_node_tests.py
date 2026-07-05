@@ -187,6 +187,40 @@ kept, why = N.resolve_fork(chain, poisoned)
 check("more-work INVALID fork rejected", kept is chain, why)
 
 print("\n" + "=" * 70)
+print("T12 TIMESTAMP RULES (Bitcoin median-time-past + future limit)")
+print("=" * 70)
+# a block claiming a timestamp far in the future must be rejected
+future = copy.deepcopy(chain[-1])
+future["timestamp"] = int(time.time()) + N.MAX_FUTURE_DRIFT + 3600
+future["block_hash"] = N.block_header_hash(future)
+errs = N.verify_block(future, chain[-2], chain[:-1])
+check("far-future timestamp rejected",
+      any("future" in e for e in errs), "; ".join(errs))
+# a block rewinding the clock below median-time-past must be rejected
+past = copy.deepcopy(chain[-1])
+past["timestamp"] = 1                      # long before any real block
+past["block_hash"] = N.block_header_hash(past)
+errs = N.verify_block(past, chain[-2], chain[:-1])
+check("pre-median timestamp rejected",
+      any("median" in e for e in errs), "; ".join(errs))
+# honest freshly-mined blocks (all of the above) already passed T1-T11
+
+print("\n" + "=" * 70)
+print("T13 PEER-TABLE POISONING (capped, junk filtered)")
+print("=" * 70)
+N.PEERS_FILE = "test_peers.json"
+if os.path.exists(N.PEERS_FILE): os.remove(N.PEERS_FILE)
+N.add_peers([f"http://attacker-{i}.example" for i in range(500)])
+n_after_flood = len(N.load_peers())
+check("peer flood capped", n_after_flood <= N.MAX_PEERS, f"kept {n_after_flood}")
+os.remove(N.PEERS_FILE)                    # empty table: junk has room to land
+N.add_peers(["ftp://bad.scheme", "not a url", 12345, "x" * 5000])
+junk = [p for p in N.load_peers()
+        if not (isinstance(p, str) and p.startswith("http"))]
+check("junk peer entries filtered", not junk, str(junk[:3]))
+os.remove(N.PEERS_FILE)
+
+print("\n" + "=" * 70)
 print(f"RESULT: {PASS} passed, {FAIL} failed")
 print("=" * 70)
 N.save_chain(chain)

@@ -70,6 +70,13 @@ def fmt_gly(units):
 TARGET_BLOCK_TIME  = 20          # seconds
 RETARGET_INTERVAL  = 5           # blocks
 MAX_RETARGET_SHIFT = 4.0         # clamp per-retarget factor, like Bitcoin
+# Timestamp consensus rules (Bitcoin's median-time-past + future limit,
+# scaled to 20s blocks). Timestamps feed difficulty retargeting, so without
+# these a miner could time-warp the schedule with fabricated clock values.
+TIMESTAMP_WINDOW   = 11          # blocks in the median-time-past window
+MAX_FUTURE_DRIFT   = 600         # seconds a timestamp may run ahead of a
+                                 # validator's clock (Bitcoin uses 2h @ 10min)
+MAX_PEERS          = 64          # peer-table cap (anti peer-list poisoning)
 # Known public nodes tried automatically before mining on a fresh chain.
 # Priority: POI_SEEDS env var > live SEEDS.txt on GitHub > baked-in fallback.
 # The GitHub fetch means seed URLs can be updated for all future nodes by
@@ -210,6 +217,13 @@ def expected_target(chain, index):
     new_target = int(prev_target * factor)          # slower than wanted -> easier
     return min(new_target, GENESIS_TARGET)          # never easier than genesis
 
+def median_time_past(chain_upto):
+    """Median timestamp of the last TIMESTAMP_WINDOW blocks (Bitcoin's MTP).
+    A new block's timestamp may not be before this value, so no miner can
+    rewind the clock to game difficulty retargeting."""
+    ts = sorted(b["timestamp"] for b in chain_upto[-TIMESTAMP_WINDOW:])
+    return ts[len(ts) // 2]
+
 def block_work(block):
     return (1 << 256) // (int(block["target"], 16) + 1)
 
@@ -299,7 +313,8 @@ def mine_block(chain, miner_addr, transactions=None, quiet=False, max_attempts=N
             coinbase = {"type": "coinbase", "to": miner_addr, "amount": block_reward(index)}
             block = {"version": PROTOCOL_VERSION, "index": index,
                      "prev_hash": prev["block_hash"],
-                     "timestamp": int(time.time()),
+                     # never below MTP even if our clock is skewed backwards
+                     "timestamp": max(int(time.time()), median_time_past(chain)),
                      "model_id": ACTIVE_MODEL,
                      "transactions": [coinbase] + (transactions or []),
                      "miner": miner_addr, "prompt": prompt, "proof_hash": hx,
@@ -330,6 +345,10 @@ def verify_block(block, prev, chain_upto):
     want = expected_target(chain_upto, block["index"])
     if int(block["target"], 16) != want:
         errs.append("target does not follow difficulty schedule")
+    if block["timestamp"] < median_time_past(chain_upto):
+        errs.append("timestamp before median-time-past")
+    if block["timestamp"] > int(time.time()) + MAX_FUTURE_DRIFT:
+        errs.append("timestamp too far in the future")
     if int(block["proof_hash"], 16) >= int(block["target"], 16):
         errs.append("proof does not meet target")
     if not errs and block["model_id"] in MODEL_REGISTRY:
@@ -388,10 +407,16 @@ def load_peers():
     return []
 
 def add_peers(urls):
+    """Capped peer table (Bitcoin caps its addrman for the same reason):
+    a hostile peer exchanging a giant or junk address list must not be able
+    to flood us out of our known-good peers or bloat the table."""
     peers = load_peers()
     for u in urls:
-        u = u.rstrip("/")
-        if u and u not in peers:
+        if not isinstance(u, str):
+            continue
+        u = u.strip().rstrip("/")
+        if (u.startswith("http://") or u.startswith("https://")) \
+                and len(u) <= 256 and u not in peers and len(peers) < MAX_PEERS:
             peers.append(u)
     with open(PEERS_FILE, "w") as f:
         json.dump(peers, f, indent=1)
@@ -426,6 +451,8 @@ def serve(port=9401):
                     verified by the mining loop (never inline, so a hostile
                     submission can't hijack the GPU serving thread)."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    _POST_GATE = threading.Semaphore(2)   # max concurrent chain submissions
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             chain = load_chain()
@@ -451,8 +478,18 @@ def serve(port=9401):
             if self.path != "/chain":
                 self.send_response(404); self.end_headers(); return
             length = int(self.headers.get("Content-Length") or 0)
-            if not 0 < length <= MAX_SYNC_BYTES:
+            # a legitimately-better chain is about the size of ours; refuse
+            # to even parse submissions wildly larger than what we hold
+            # (anti resource-exhaustion: parsing is the pre-inference cost)
+            try:
+                local_size = os.path.getsize(CHAIN_FILE)
+            except OSError:
+                local_size = 1 << 20
+            post_cap = min(MAX_SYNC_BYTES, 4 * local_size + (1 << 20))
+            if not 0 < length <= post_cap:
                 self.send_response(413); self.end_headers(); return
+            if not _POST_GATE.acquire(blocking=False):
+                self.send_response(503); self.end_headers(); return
             try:
                 remote = json.loads(self.rfile.read(length))
                 local = load_chain()
@@ -467,6 +504,8 @@ def serve(port=9401):
                     verdict, code = "queued already has higher-work candidate", 200
             except Exception as e:
                 verdict, code = f"malformed: {e}", 400
+            finally:
+                _POST_GATE.release()
             body = json.dumps({"result": verdict}).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
