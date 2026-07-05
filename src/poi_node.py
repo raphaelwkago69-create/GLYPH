@@ -27,6 +27,14 @@ Files: poi_chain_v2.json (chain), poi_wallets.json (keys), poi_mempool.json
 """
 import hashlib, json, math, os, random, sys, time
 
+# Give every outgoing HTTP request a normal User-Agent. Some seed hosts sit
+# behind a CDN/proxy (e.g. Cloudflare) that 403s the default "Python-urllib"
+# agent as a suspected bot, which would silently block newcomers from joining.
+import urllib.request as _urlreq
+_opener = _urlreq.build_opener()
+_opener.addheaders = [("User-Agent", "glyph-node/0.3")]
+_urlreq.install_opener(_opener)
+
 # ------------------------------------------------------------ protocol -----
 PROTOCOL_VERSION = 3
 MODEL_REGISTRY = {
