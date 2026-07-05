@@ -617,7 +617,12 @@ def gossip_run(wallet_name, port=9401):
                            max_attempts=GOSSIP_CHUNK)
         if block is not None:
             chain.append(block); save_chain(chain)
-            save_mempool([])
+            # Remove ONLY the txs we actually included -- not the whole pool.
+            # A `send` can write a new tx into the mempool after mine_block
+            # took its snapshot; blindly clearing would drop that tx (it was
+            # never mined). Re-read now and keep anything not in this block.
+            included = block["transactions"][1:]   # skip coinbase
+            save_mempool([t for t in load_mempool() if t not in included])
             for p in list(load_peers()):
                 try:
                     print(f"[run] push -> {p}: {push_chain(p, chain)}")
