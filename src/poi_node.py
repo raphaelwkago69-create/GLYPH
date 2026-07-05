@@ -264,8 +264,12 @@ def load_chain():
     return [genesis_block()]
 
 def save_chain(chain):
-    with open(CHAIN_FILE, "w") as f:
+    # atomic: the serving process reads this file concurrently; write-then-
+    # rename means it can never observe a half-written chain
+    tmp = CHAIN_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(chain, f, indent=1)
+    os.replace(tmp, CHAIN_FILE)
 
 # ------------------------------------------------------------ mining -------
 VOCAB = """the a is was in on to and of it that for with as at by from or an
@@ -400,8 +404,10 @@ def inbox_put(remote_chain):
             pending = json.load(f)
         if chain_work(remote_chain) <= chain_work(pending):
             return False
-    with open(INBOX_FILE, "w") as f:
+    tmp = INBOX_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(remote_chain, f)
+    os.replace(tmp, INBOX_FILE)   # atomic: mining process reads concurrently
     return True
 
 def inbox_take():
@@ -419,8 +425,7 @@ def serve(port=9401):
     POST /chain  -> submit a higher-work chain; queued to the inbox and
                     verified by the mining loop (never inline, so a hostile
                     submission can't hijack the GPU serving thread)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             chain = load_chain()
@@ -470,7 +475,7 @@ def serve(port=9401):
             self.wfile.write(body)
         def log_message(self, fmt, *args):
             print(f"[serve] {self.client_address[0]} {fmt % args}")
-    srv = HTTPServer(("0.0.0.0", port), Handler)
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[serve] node listening on 0.0.0.0:{port}  "
           f"(GET /chain /status /peers, POST /chain)")
     return srv
@@ -517,15 +522,21 @@ def sync(peer_url):
     return why
 
 def gossip_run(wallet_name, port=9401):
-    """Full node: serve + mine + gossip in one process.
-    Mines in GOSSIP_CHUNK-attempt slices; between slices it (a) adopts any
-    verified higher-work chain from the POST inbox, (b) polls peers' /status
-    and pulls if someone is ahead, so it never mines long on a stale tip.
-    Winning a block pushes the chain to every known peer."""
-    import threading
+    """Full node: mine + gossip, with serving in a SEPARATE PROCESS.
+    Same split Bitcoin arrived at (bitcoind vs. mining software): the miner
+    grinds inference without ever starving the HTTP endpoints, and the
+    server answers peers instantly no matter how hard mining is running.
+    The two talk only through files on disk (chain file, inbox file), both
+    written atomically. Mining runs in GOSSIP_CHUNK-attempt slices; between
+    slices it (a) adopts any verified higher-work chain from the POST inbox,
+    (b) polls peers' /status and pulls if someone is ahead, so it never
+    mines long on a stale tip. Winning a block pushes to every known peer."""
+    import atexit, subprocess
     w = make_wallet(wallet_name)
-    srv = serve(port)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv_proc = subprocess.Popen(
+        [sys.executable, "-u", os.path.abspath(__file__), "serve", str(port)])
+    atexit.register(srv_proc.terminate)
+    print(f"[run] server process started (pid {srv_proc.pid})")
     peers = add_peers(get_seed_nodes())
     chain = load_chain()
     if len(chain) == 1:
