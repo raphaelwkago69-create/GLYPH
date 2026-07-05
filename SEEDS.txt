@@ -1,4 +1,4 @@
 # Glyph live seed nodes — one URL per line, '#' lines ignored.
 # Nodes fetch this file from GitHub at startup, so it can be updated
 # without shipping new code. PRs adding community seed nodes welcome.
-https://pittsburgh-serving-accountability-geo.trycloudflare.com
+https://glyph.surfacedplus.com

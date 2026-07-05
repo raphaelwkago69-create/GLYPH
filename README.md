@@ -75,10 +75,10 @@ readable by a human or an AI assistant.
 
 ## Join the live network
 
-The founder seed node is currently at:
-`https://pittsburgh-serving-accountability-geo.trycloudflare.com`
-(temporary tunnel URL — if unreachable, check this README's latest version
-or open an issue). To join as a full node (serve + mine + gossip in one):
+The founder seed node is at a permanent address:
+`https://glyph.surfacedplus.com`
+(if unreachable, check `SEEDS.txt` for the current seed list or open an
+issue). To join as a full node (serve + mine + gossip in one):
 
 ```
 python src/poi_node.py run yourname
