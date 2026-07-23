@@ -51,7 +51,8 @@ EXP2_C3_Q16 = 5207         # round((3 ln2 - 2) * 65536)
 
 GRID = 100                 # fingerprint quantization grid (protocol constant)
 
-_W = None                  # converted integer weights
+_W = None                  # converted integer weights (consensus, hashed)
+_LNF = None                # final layernorm, generation only -- NOT in WEIGHTS_HASH
 _tok = None
 _device = None
 _torch = None
@@ -184,7 +185,7 @@ def load_model():
     """Convert HF gpt2 float weights to integers ONCE (on CPU, deterministic:
     identical safetensors bytes -> identical ints on every platform), then
     move to the compute device. Prints WEIGHTS_HASH for protocol pinning."""
-    global _W, _tok, _device, _torch, WEIGHTS_HASH
+    global _W, _LNF, _tok, _device, _torch, WEIGHTS_HASH
     if _W is not None:
         return
     import torch
@@ -208,6 +209,10 @@ def load_model():
         for m in ('attn.c_attn', 'attn.c_proj', 'mlp.c_fc', 'mlp.c_proj'):
             W[f'h.{l}.{m}.w'] = q_w(p + m + '.weight')
             W[f'h.{l}.{m}.b'] = q_b(p + m + '.bias')
+    # ln_f is converted the same deterministic way but kept OUT of W so
+    # WEIGHTS_HASH (the consensus pin over the fingerprint path) is unchanged.
+    # It is only used by generate(), whose own determinism is by construction.
+    lnf = {'g': q_w('transformer.ln_f.weight'), 'b': q_b('transformer.ln_f.bias')}
     hh = hashlib.sha256()
     for kname in sorted(W):
         hh.update(kname.encode())
@@ -215,6 +220,7 @@ def load_model():
     WEIGHTS_HASH = hh.hexdigest()
     print(f"[int-infer] integer weights hash: {WEIGHTS_HASH}")
     _W = {kk: vv.to(_device) for kk, vv in W.items()}
+    _LNF = {kk: vv.to(_device) for kk, vv in lnf.items()}
     del fm, sd
     _tok = GPT2Tokenizer.from_pretrained("gpt2")
 
@@ -309,3 +315,55 @@ def inference_hash(prompt, salt):
         parts.append((layer, head, B, gl))
     fp = json.dumps(parts, separators=(',', ':'))
     return hashlib.sha256((salt + '|' + fp).encode()).hexdigest()
+
+# ------------------------------------------------- generation (market) -----
+# Deterministic text generation for the inference market (docs/USEFUL_WORK.md).
+# Same exactness argument as the fingerprint path: every op is integer or an
+# exact float64 integer matmul, so generate(prompt, n) is bit-identical on
+# every device. That exactness is what makes the market's fraud proofs
+# objective: one differing token is a provable lie, no tolerance needed.
+#
+# Logits bound: hidden Q9 (|q| <= 4096*2^9 = 2^21) x wte Q9 (same bound),
+# contraction K = 768: |sum| <= 768 * 2^42 < 2^52 < 2^53 -- every float64
+# partial sum exact regardless of accumulation order.
+
+GEN_MAX_CONTEXT = 512      # positions cap (wpe has 1024; stay well inside)
+
+def _forward(ids):
+    """Full integer transformer pass; returns final hidden states [T,768] Q16."""
+    torch = _torch
+    T = ids.shape[0]
+    x = _W['wte'].index_select(0, ids) + _W['wpe'][:T]
+    x = torch.clamp(x, -ACT_CLAMP, ACT_CLAMP)
+    for l in range(12):
+        a, _ = _attention(_layernorm(x, _W[f'h.{l}.ln_1.g'], _W[f'h.{l}.ln_1.b']), l, T)
+        x = torch.clamp(x + a, -ACT_CLAMP, ACT_CLAMP)
+        x = torch.clamp(x + _mlp(_layernorm(x, _W[f'h.{l}.ln_2.g'], _W[f'h.{l}.ln_2.b']), l),
+                        -ACT_CLAMP, ACT_CLAMP)
+    return x
+
+def generate(prompt, max_new_tokens=64):
+    """Greedy (argmax) decode, integer-exact and therefore bit-identical
+    everywhere. No KV cache: T <= GEN_MAX_CONTEXT keeps the recompute cheap
+    and the code inside the audited exact-arithmetic paths above."""
+    load_model()
+    torch = _torch
+    ids = _tok(prompt, return_tensors="pt")["input_ids"][0].to(_device)
+    ids = ids[-(GEN_MAX_CONTEXT - max_new_tokens):]
+    out_ids = []
+    w9 = _rshift_round(_W['wte'], F - 9)               # Q9 embeddings
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            if ids.shape[0] >= GEN_MAX_CONTEXT:
+                break
+            x = _forward(ids)
+            h = _layernorm(x[-1:], _LNF['g'], _LNF['b'])
+            h9 = _rshift_round(h, F - 9)               # Q9 hidden
+            logits = (h9.double() @ w9.double().t()).long()[0].cpu()
+            nxt = int(torch.argmax(logits))            # CPU argmax: first-max
+                                                       # tie-break, deterministic
+            if nxt == 50256:                           # <|endoftext|>
+                break
+            ids = torch.cat([ids, torch.tensor([nxt], device=_device)])
+            out_ids.append(nxt)
+    return _tok.decode(out_ids)

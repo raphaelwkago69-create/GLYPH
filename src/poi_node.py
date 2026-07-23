@@ -40,7 +40,22 @@ _urlreq.install_opener(_opener)
 # are exact integer arithmetic end to end, so the proof hash is bit-identical
 # on every device BY CONSTRUCTION -- the v3 cross-hardware boundary flip
 # (mainnet block 1693) is impossible in this protocol.
-PROTOCOL_VERSION = 4
+# v5: OPTIMISTIC INFERENCE MARKET (docs/USEFUL_WORK.md). New transaction
+# types job/result/challenge/verdict turn the network into a decentralized
+# inference service: users escrow fees for prompts, servers post real model
+# outputs bonded by stake, disputes are settled by consensus re-running the
+# ONE disputed generation (exact integer decode -> a lie is objective).
+# CONSENSUS CHANGE: v4 nodes reject v5 blocks; the live network must adopt
+# v5 for the market to run on mainnet. Until then this is a testnet protocol.
+PROTOCOL_VERSION = 5
+# --- market parameters ---
+JOB_STAKE_MULT     = 10     # server bonds fee*this to post a result
+CHALLENGE_WINDOW   = 30     # blocks a result can be disputed (~10 min)
+JOB_EXPIRY         = 90     # blocks before an unserved job refunds its poster
+JOB_MAX_TOKENS     = 64     # generation length (protocol constant: verdicts
+                            # re-run generate(prompt, JOB_MAX_TOKENS))
+JOB_MAX_OUTPUT     = 4000   # chars of output allowed on-chain (data availability)
+JOB_MAX_PROMPT     = 1000
 MODEL_REGISTRY = {
     # vetted by audit (determinism / fingerprint-space / cost benchmarks);
     # additions require a protocol version bump adopted by the whole network.
@@ -77,6 +92,25 @@ TIMESTAMP_WINDOW   = 11          # blocks in the median-time-past window
 MAX_FUTURE_DRIFT   = 600         # seconds a timestamp may run ahead of a
                                  # validator's clock (Bitcoin uses 2h @ 10min)
 MAX_PEERS          = 64          # peer-table cap (anti peer-list poisoning)
+# Verification-DoS defenses (node policy, not consensus): a chain that fails
+# full verification cost us real inference, so the submitting IP is banned;
+# and POST /chain is rate-limited per IP so one host cannot keep the inbox
+# churning even with valid-looking (higher-claimed-work) junk.
+BAN_SECONDS        = 3600        # how long an IP that fed us an invalid chain is banned
+POST_MIN_INTERVAL  = 10          # seconds between accepted POSTs from one IP
+# Checkpoints (node policy): {height: block_hash} pins. A remote chain that
+# disagrees with a pinned hash is rejected without verification, whatever its
+# claimed work. This is Bitcoin's assumevalid/checkpoint defense: a majority
+# attacker with rented GPUs can extend the tip, but can never rewrite history
+# below a checkpoint on nodes that pin it. Set POI_CHECKPOINTS="h:hash,h:hash".
+def _load_checkpoints():
+    cps = {}
+    for part in os.environ.get("POI_CHECKPOINTS", "").split(","):
+        if ":" in part:
+            h, hx = part.split(":", 1)
+            cps[int(h.strip())] = hx.strip()
+    return cps
+CHECKPOINTS = _load_checkpoints()
 # Known public nodes tried automatically before mining on a fresh chain.
 # Priority: POI_SEEDS env var > live SEEDS.txt on GitHub > baked-in fallback.
 # The GitHub fetch means seed URLs can be updated for all future nodes by
@@ -111,6 +145,7 @@ WALLET_FILE  = _P + "poi_wallets.json"
 MEMPOOL_FILE = _P + "poi_mempool.json"
 PEERS_FILE   = _P + "poi_peers.json"
 INBOX_FILE   = _P + "poi_inbox.json"
+BANS_FILE    = _P + "poi_bans.json"
 
 # ------------------------------------------- model + fingerprint (v4) ------
 # The float model and float fingerprint path are GONE from consensus.
@@ -133,6 +168,13 @@ def load_model():
 def inference_hash(prompt, salt):
     load_model()
     return int_infer.inference_hash(prompt, salt)
+
+def job_output(prompt):
+    """The market's canonical answer for a prompt: deterministic integer
+    greedy decode. Every honest node computes the same string, so a result
+    that differs from this is provably fraudulent."""
+    load_model()
+    return int_infer.generate(prompt, JOB_MAX_TOKENS)
 
 # ------------------------------------------------------------ wallets ------
 import ecdsa
@@ -160,9 +202,24 @@ def make_wallet(name):
     print(f"[wallet] created '{name}'  address={addr}")
     return wallets[name]
 
+# signed fields per transaction type; transfers keep the original v4 key set
+# so their signatures remain valid unchanged
+_TX_SIGNED_KEYS = {
+    "transfer":  ("from", "to", "amount", "nonce", "pubkey"),
+    "job":       ("type", "from", "prompt", "fee", "nonce", "pubkey"),
+    "result":    ("type", "from", "job_id", "output", "nonce", "pubkey"),
+    "challenge": ("type", "from", "job_id", "nonce", "pubkey"),
+}
+
 def tx_signing_payload(tx):
-    return json.dumps({k: tx[k] for k in ("from", "to", "amount", "nonce", "pubkey")},
+    keys = _TX_SIGNED_KEYS[tx.get("type", "transfer")]
+    return json.dumps({k: tx[k] for k in keys},
                       separators=(',', ':'), sort_keys=True).encode()
+
+def job_id_of(job_tx):
+    """A job's identity is the hash of its signed content (nonce makes it
+    unique per poster)."""
+    return hashlib.sha256(tx_signing_payload(job_tx)).hexdigest()[:24]
 
 def sign_tx(tx, private_hex):
     sk = ecdsa.SigningKey.from_string(bytes.fromhex(private_hex), curve=ecdsa.SECP256k1)
@@ -231,33 +288,104 @@ def chain_work(chain):
     return sum(block_work(b) for b in chain[1:])
 
 # ------------------------------------------------------------ state --------
-def compute_balances(chain, upto=None):
-    """Replay the chain into {address: balance}. Returns None if any economic
-    rule is violated (bad signature, overspend, wrong coinbase, reused nonce)."""
-    bal, nonces = {}, {}
+def compute_state(chain, upto=None):
+    """Replay the chain into (balances, jobs). Returns (None, None) if any
+    economic rule is violated (bad signature, overspend, wrong coinbase,
+    reused nonce, or an invalid market transition).
+
+    Market lifecycle (docs/USEFUL_WORK.md):
+      job:       poster escrows `fee`                        -> status open
+      result:    server posts output, bonds fee*STAKE_MULT   -> status served
+      (window passes unchallenged): server paid fee+stake    -> status paid
+      (JOB_EXPIRY with no result):  poster refunded          -> status expired
+      challenge: challenger bonds `fee`                      -> status challenged
+      verdict:   miner-inserted; verify_block re-ran the generation, so the
+                 `honest` field here is trusted to be consensus-checked.
+                 honest server:      stake+fee+bond -> server
+                 honest challenger:  bond + stake/2 -> challenger,
+                                     stake - stake/2 burned, fee -> poster"""
+    bal, nonces, jobs = {}, {}, {}
+    def credit(a, v): bal[a] = bal.get(a, 0) + v
+    def spend(a, v):
+        if v <= 0 or bal.get(a, 0) < v: return False
+        bal[a] -= v; return True
     for block in chain[1:upto]:
+        h = block["index"]
+        # settlements that fall due at this height, before this block's txs
+        for j in jobs.values():
+            if j["status"] == "open" and h >= j["posted"] + JOB_EXPIRY:
+                credit(j["poster"], j["fee"]); j["status"] = "expired"
+            elif j["status"] == "served" and h > j["served"] + CHALLENGE_WINDOW:
+                credit(j["server"], j["stake"] + j["fee"]); j["status"] = "paid"
         txs = block["transactions"]
         if not txs or txs[0].get("type") != "coinbase":
-            return None
+            return None, None
         cb = txs[0]
-        if cb["amount"] != block_reward(block["index"]) or cb["to"] != block["miner"]:
-            return None
-        bal[cb["to"]] = bal.get(cb["to"], 0) + cb["amount"]
+        if cb["amount"] != block_reward(h) or cb["to"] != block["miner"]:
+            return None, None
+        credit(cb["to"], cb["amount"])
         for tx in txs[1:]:
-            if tx.get("type") == "coinbase":
-                return None                      # only one coinbase per block
+            t = tx.get("type", "transfer")
+            if t == "coinbase":
+                return None, None                # only one coinbase per block
+            if t == "verdict":
+                # unsigned, miner-inserted; correctness of `honest` is checked
+                # in verify_block by re-running the generation
+                j = jobs.get(tx.get("job_id"))
+                if j is None or j["status"] != "challenged":
+                    return None, None
+                if tx.get("honest") == "server":
+                    credit(j["server"], j["stake"] + j["fee"] + j["bond"])
+                elif tx.get("honest") == "challenger":
+                    half = j["stake"] // 2       # other half burned
+                    credit(j["challenger"], j["bond"] + half)
+                    credit(j["poster"], j["fee"])
+                else:
+                    return None, None
+                j["status"] = "closed:" + tx["honest"]
+                continue
             if not verify_tx_signature(tx):
-                return None
-            if tx["amount"] <= 0:
-                return None
+                return None, None
             if nonces.get(tx["from"], -1) >= tx["nonce"]:
-                return None                      # replayed / out-of-order nonce
-            if bal.get(tx["from"], 0) < tx["amount"]:
-                return None                      # overspend
+                return None, None                # replayed / out-of-order nonce
             nonces[tx["from"]] = tx["nonce"]
-            bal[tx["from"]] -= tx["amount"]
-            bal[tx["to"]] = bal.get(tx["to"], 0) + tx["amount"]
-    return bal
+            if t == "transfer":
+                if tx["amount"] <= 0 or not spend(tx["from"], tx["amount"]):
+                    return None, None
+                credit(tx["to"], tx["amount"])
+            elif t == "job":
+                if not (0 < len(tx["prompt"]) <= JOB_MAX_PROMPT):
+                    return None, None
+                if not spend(tx["from"], tx["fee"]):
+                    return None, None            # fee escrowed
+                jobs[job_id_of(tx)] = {"poster": tx["from"], "prompt": tx["prompt"],
+                                       "fee": tx["fee"], "posted": h,
+                                       "status": "open"}
+            elif t == "result":
+                j = jobs.get(tx["job_id"])
+                if j is None or j["status"] != "open":
+                    return None, None
+                if len(tx["output"]) > JOB_MAX_OUTPUT:
+                    return None, None
+                stake = j["fee"] * JOB_STAKE_MULT
+                if not spend(tx["from"], stake):
+                    return None, None            # stake bonded
+                j.update(server=tx["from"], output=tx["output"], stake=stake,
+                         served=h, status="served")
+            elif t == "challenge":
+                j = jobs.get(tx["job_id"])
+                if j is None or j["status"] != "served" \
+                        or h > j["served"] + CHALLENGE_WINDOW:
+                    return None, None
+                if not spend(tx["from"], j["fee"]):
+                    return None, None            # bond = the job fee
+                j.update(challenger=tx["from"], bond=j["fee"], status="challenged")
+            else:
+                return None, None                # unknown transaction type
+    return bal, jobs
+
+def compute_balances(chain, upto=None):
+    return compute_state(chain, upto)[0]
 
 # ------------------------------------------------------------ mempool ------
 def load_mempool():
@@ -356,6 +484,27 @@ def verify_block(block, prev, chain_upto):
         hx = inference_hash(block["prompt"], salt)     # the ONE inference
         if hx != block["proof_hash"]:
             errs.append(f"proof mismatch: recomputed {hx[:16]}...")
+    # market fraud proofs: a verdict is only valid if OUR OWN re-run of the
+    # disputed generation agrees with it. This is the single place consensus
+    # pays for a job inference, and only when someone posted a challenge.
+    if not errs:
+        verdicts = [t for t in block["transactions"][1:]
+                    if t.get("type") == "verdict"]
+        if verdicts:
+            _, jobs = compute_state(chain_upto)        # cheap replay, no inference
+            if jobs is None:
+                errs.append("verdict in block but prior state invalid")
+            else:
+                for v in verdicts:
+                    j = jobs.get(v.get("job_id"))
+                    if j is None or j["status"] != "challenged":
+                        errs.append("verdict for non-challenged job")
+                        continue
+                    truth = "server" if job_output(j["prompt"]) == j["output"] \
+                            else "challenger"
+                    if v.get("honest") != truth:
+                        errs.append(f"verdict lies: recomputation says {truth} "
+                                    f"was honest for job {v['job_id'][:8]}")
     return errs
 
 def verify_chain(chain, verbose=True):
@@ -377,6 +526,29 @@ def verify_chain(chain, verbose=True):
         ok = False
     return ok
 
+# ------------------------------------------------------------ market -------
+def next_nonce(chain, addr):
+    """Next unused nonce for addr across chain + mempool."""
+    used = [t["nonce"] for t in load_mempool() if t.get("from") == addr]
+    chain_used = [t.get("nonce", -1) for b in chain[1:]
+                  for t in b["transactions"][1:] if t.get("from") == addr]
+    return max(used + chain_used + [-1]) + 1
+
+def market_txs_for_miner(chain):
+    """Verdict txs the next block should carry: one per challenged job.
+    Costs the miner one generation per open dispute -- the only time the
+    market makes a miner run inference."""
+    _, jobs = compute_state(chain)
+    if jobs is None:
+        return []
+    out = []
+    for jid, j in jobs.items():
+        if j["status"] == "challenged":
+            truth = "server" if job_output(j["prompt"]) == j["output"] \
+                    else "challenger"
+            out.append({"type": "verdict", "job_id": jid, "honest": truth})
+    return out
+
 def resolve_fork(local, remote):
     """Adopt remote iff it is fully valid and has strictly more work.
     Blocks identical to already-validated local ones are not re-verified
@@ -386,6 +558,13 @@ def resolve_fork(local, remote):
         return local, "rejected: different genesis"
     if chain_work(remote) <= chain_work(local):
         return local, "kept local: remote has <= work"
+    # checkpoint gate BEFORE any inference: a chain that rewrites history
+    # below a pin is hostile by definition, however much work it claims
+    for h, hx in CHECKPOINTS.items():
+        if h < len(remote) and remote[h]["block_hash"] != hx:
+            return local, f"rejected: violates checkpoint at height {h}"
+        if h >= len(remote):
+            return local, f"rejected: shorter than checkpoint height {h}"
     common = 0
     for i in range(1, min(len(local), len(remote))):
         if remote[i] != local[i]:
@@ -422,26 +601,48 @@ def add_peers(urls):
         json.dump(peers, f, indent=1)
     return peers
 
-def inbox_put(remote_chain):
-    """Keep at most one pending remote chain: the highest-claimed-work one."""
+def load_bans():
+    if os.path.exists(BANS_FILE):
+        with open(BANS_FILE) as f:
+            bans = json.load(f)
+        now = time.time()
+        return {ip: t for ip, t in bans.items() if t > now}
+    return {}
+
+def is_banned(ip):
+    return ip in load_bans()
+
+def ban_ip(ip, reason=""):
+    """An invalid chain costs us real inference to discover; make its source
+    pay for it with a timeout. Bitcoin bans misbehaving peers the same way."""
+    bans = load_bans()
+    bans[ip] = time.time() + BAN_SECONDS
+    with open(BANS_FILE, "w") as f:
+        json.dump(bans, f, indent=1)
+    print(f"[ban] {ip} for {BAN_SECONDS}s ({reason})")
+
+def inbox_put(remote_chain, source="?"):
+    """Keep at most one pending remote chain: the highest-claimed-work one.
+    The source IP rides along so the verifier can ban whoever fed us junk."""
     if os.path.exists(INBOX_FILE):
         with open(INBOX_FILE) as f:
-            pending = json.load(f)
+            pending = json.load(f)["chain"]
         if chain_work(remote_chain) <= chain_work(pending):
             return False
     tmp = INBOX_FILE + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(remote_chain, f)
+        json.dump({"source": source, "chain": remote_chain}, f)
     os.replace(tmp, INBOX_FILE)   # atomic: mining process reads concurrently
     return True
 
 def inbox_take():
+    """Returns (source_ip, chain) or None."""
     if not os.path.exists(INBOX_FILE):
         return None
     with open(INBOX_FILE) as f:
         pending = json.load(f)
     os.remove(INBOX_FILE)
-    return pending
+    return pending["source"], pending["chain"]
 
 def serve(port=9401):
     """Serve this node's chain over HTTP.
@@ -453,6 +654,8 @@ def serve(port=9401):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
     _POST_GATE = threading.Semaphore(2)   # max concurrent chain submissions
+    _last_post = {}                       # ip -> time of last accepted POST
+    _lp_lock = threading.Lock()
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             chain = load_chain()
@@ -477,6 +680,14 @@ def serve(port=9401):
         def do_POST(self):
             if self.path != "/chain":
                 self.send_response(404); self.end_headers(); return
+            ip = self.client_address[0]
+            if is_banned(ip):
+                self.send_response(403); self.end_headers(); return
+            with _lp_lock:   # per-IP rate limit: cheap gate before any parsing
+                now = time.time()
+                if now - _last_post.get(ip, 0) < POST_MIN_INTERVAL:
+                    self.send_response(429); self.end_headers(); return
+                _last_post[ip] = now
             length = int(self.headers.get("Content-Length") or 0)
             # a legitimately-better chain is about the size of ours; refuse
             # to even parse submissions wildly larger than what we hold
@@ -498,7 +709,7 @@ def serve(port=9401):
                     verdict, code = "rejected: different genesis", 400
                 elif chain_work(remote) <= chain_work(local):
                     verdict, code = "rejected: not more work", 200
-                elif inbox_put(remote):
+                elif inbox_put(remote, source=ip):
                     verdict, code = "queued for verification", 202
                 else:
                     verdict, code = "queued already has higher-work candidate", 200
@@ -594,12 +805,17 @@ def gossip_run(wallet_name, port=9401):
           f"gossiping with {len(load_peers())} peer(s)")
     while True:
         # 1. adopt anything a peer pushed to us (verify OUR side, one thread)
-        pending = inbox_take()
-        if pending is not None:
+        taken = inbox_take()
+        if taken is not None:
+            source, pending = taken
             kept, why = resolve_fork(chain, pending)
             print(f"[run] inbox: {why}")
             if kept is pending:
                 chain = pending; save_chain(chain)
+            elif "invalid" in why or "checkpoint" in why:
+                # this submission burned our inference (or tried to rewrite
+                # pinned history) -- its source doesn't get another shot soon
+                ban_ip(source, why)
         # 2. every ~20s, ask peers if someone is ahead; pull if so
         if time.time() - last_poll > 20:
             last_poll = time.time()
@@ -613,7 +829,8 @@ def gossip_run(wallet_name, port=9401):
                 except Exception:
                     pass
         # 3. mine a slice on the current tip
-        block = mine_block(chain, w["address"], transactions=load_mempool(),
+        block = mine_block(chain, w["address"],
+                           transactions=load_mempool() + market_txs_for_miner(chain),
                            max_attempts=GOSSIP_CHUNK)
         if block is not None:
             chain.append(block); save_chain(chain)
@@ -661,7 +878,8 @@ def main():
         w = make_wallet(wname)
         mp = load_mempool()
         for _ in range(n):
-            block = mine_block(chain, w["address"], transactions=mp)
+            block = mine_block(chain, w["address"],
+                               transactions=mp + market_txs_for_miner(chain))
             chain.append(block)
             save_chain(chain)
             mp = []; save_mempool(mp)
@@ -685,6 +903,67 @@ def main():
         mp.append(tx); save_mempool(mp)
         print(f"[tx] queued {fmt_gly(amt)} GLY from {frm} -> {to} "
               f"(balance {fmt_gly(bal.get(w['address'], 0))})")
+    elif cmd == "job":
+        # job WALLET "prompt text" FEE_GLY  -- pay the network for an answer
+        wname, prompt = sys.argv[2], sys.argv[3]
+        fee = round(float(sys.argv[4]) * UNITS_PER_GLY)
+        w = make_wallet(wname)
+        tx = {"type": "job", "from": w["address"], "prompt": prompt, "fee": fee,
+              "nonce": next_nonce(chain, w["address"]), "pubkey": w["public"]}
+        tx = sign_tx(tx, w["private"])
+        mp = load_mempool(); mp.append(tx); save_mempool(mp)
+        print(f"[job] queued id={job_id_of(tx)}  fee={fmt_gly(fee)} GLY  "
+              f"prompt={prompt[:50]!r}")
+    elif cmd == "answer":
+        # answer WALLET  -- serve every open job (runs real inference), bond stake
+        w = make_wallet(sys.argv[2])
+        _, jobs = compute_state(chain)
+        if jobs is None:
+            print("[answer] chain state invalid"); sys.exit(1)
+        mp = load_mempool()
+        claimed = {t["job_id"] for t in mp if t.get("type") == "result"}
+        served = 0
+        for jid, j in jobs.items():
+            if j["status"] != "open" or jid in claimed:
+                continue
+            out = job_output(j["prompt"])
+            tx = {"type": "result", "from": w["address"], "job_id": jid,
+                  "output": out, "nonce": next_nonce(chain, w["address"]),
+                  "pubkey": w["public"]}
+            mp.append(sign_tx(tx, w["private"])); save_mempool(mp)
+            served += 1
+            print(f"[answer] job {jid[:8]} fee={fmt_gly(j['fee'])} "
+                  f"stake={fmt_gly(j['fee'] * JOB_STAKE_MULT)} -> {out[:60]!r}")
+        print(f"[answer] served {served} job(s)")
+    elif cmd == "watch":
+        # watch WALLET  -- re-run served jobs in their window, challenge lies
+        w = make_wallet(sys.argv[2])
+        _, jobs = compute_state(chain)
+        if jobs is None:
+            print("[watch] chain state invalid"); sys.exit(1)
+        mp = load_mempool()
+        disputed = {t["job_id"] for t in mp if t.get("type") == "challenge"}
+        for jid, j in jobs.items():
+            if j["status"] != "served" or jid in disputed:
+                continue
+            if job_output(j["prompt"]) == j["output"]:
+                print(f"[watch] job {jid[:8]} honest")
+                continue
+            tx = {"type": "challenge", "from": w["address"], "job_id": jid,
+                  "nonce": next_nonce(chain, w["address"]), "pubkey": w["public"]}
+            mp.append(sign_tx(tx, w["private"])); save_mempool(mp)
+            print(f"[watch] job {jid[:8]} FRAUD -- challenge queued "
+                  f"(bond {fmt_gly(j['fee'])}, win {fmt_gly(j['stake'] // 2)})")
+    elif cmd == "jobs":
+        _, jobs = compute_state(chain)
+        if jobs is None:
+            print("[jobs] chain state invalid"); sys.exit(1)
+        for jid, j in jobs.items():
+            print(f"  {jid[:12]}  {j['status']:<18} fee={fmt_gly(j['fee'])} "
+                  f"prompt={j['prompt'][:40]!r}"
+                  + (f" output={j['output'][:40]!r}" if "output" in j else ""))
+        if not jobs:
+            print("  (no jobs on chain)")
     elif cmd == "balance":
         bal = compute_balances(chain)
         if bal is None:
