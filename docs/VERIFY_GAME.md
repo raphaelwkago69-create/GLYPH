@@ -44,17 +44,20 @@ cheaply verifiable here. (Test [4] checks this property directly.)
 
 ## Measured (real GPT-2, CPU)
 
-| model        | layers | trace steps (10 tok) | one-step | verify speed-up |
-|--------------|--------|----------------------|----------|-----------------|
-| gpt2 (124M)  | 12     | 209 (8 tok)          | ~0.11s   | 41x             |
-| gpt2-large   | 36     | 741                  | ~0.16s   | 154x            |
+| model        | layers | params | trace steps | one-step | verify speed-up |
+|--------------|--------|--------|-------------|----------|-----------------|
+| gpt2         | 12     | 124M   | 209 (8 tok) | ~0.11s   | 41x             |
+| gpt2-large   | 36     | 774M   | 741 (10 tok)| ~0.16s   | 154x            |
+| gpt2-xl      | 48     | 1.5B   | 981 (10 tok)| ~0.20s   | 254x            |
 
-The speed-up GROWS with model depth (one step is ~1/(2*n_layer) of a token's
-work) and with answer length, while the referee's cost stays ~constant. On a
-100+ layer model the advantage is hundreds-to-thousands x. gpt2-xl (1.5B, 48
-layers) is the ceiling of the current exact engine without re-porting a new
-architecture; every GPT-2 variant keeps head_dim=64 so the proven integer
-bounds hold unchanged (src/gen_model.py).
+The speed-up GROWS monotonically with model depth (one step is ~1/(2*n_layer)
+of a token's work) and with answer length, while the referee's cost stays
+~constant. On a 100+ layer model the advantage is hundreds-to-thousands x.
+gpt2-xl (1.5B, 48 layers) is the ceiling of the current exact engine without
+re-porting a new architecture; every GPT-2 variant keeps head_dim=64 so the
+proven integer bounds hold unchanged (src/gen_model.py). Example real answers:
+"The future of money is / in the hands of the people." (large); "The most
+important lesson in life is / that you can't control what happens to you." (xl).
 
 ## Tested invariants
 
